@@ -1,69 +1,147 @@
-import Image from "next/image";
+import Link from "next/link";
+import { StatsCards, CoverageBar } from "@/components/stats-cards";
+import { FilterBar, readFilters } from "@/components/filter-bar";
+import { Pagination } from "@/components/table-chrome";
+import { getStats, getSyncStatus, queryPools, DEFAULT_MIN_LIQ_USD } from "@/server/queries";
+import { formatRelative } from "@/lib/format";
+import { PoolRowView } from "@/components/pool-row";
 
-export default function Home() {
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+const PAGE_SIZE = 50;
+
+type Search = Record<string, string | string[] | undefined>;
+
+export default async function PoolsPage({ searchParams }: { searchParams: Promise<Search> }) {
+  const sp = await searchParams;
+  const filters = readFilters(sp);
+  const stats = getStats();
+  const [syncJob] = getSyncStatus();
+
+  const result = queryPools({
+    sort: filters.sort,
+    order: filters.order === "asc" ? "asc" : "desc",
+    page: Number(filters.page) || 1,
+    limit: PAGE_SIZE,
+    minLiq: filters.minLiq === "all" ? null : Number(filters.minLiq) || DEFAULT_MIN_LIQ_USD,
+    minApr: filters.minApr ? Number(filters.minApr) : null,
+    maxAgeHours: filters.maxAgeHours ? Number(filters.maxAgeHours) : null,
+    dex: filters.dex || null,
+    search: filters.search || null,
+  });
+
+  const isEmptyDb = stats.trackedPools === 0;
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+    <div className="space-y-4">
+      <section className="space-y-2">
+        <h1 className="text-2xl font-semibold tracking-tight">
+          Arc Liquidity &amp; Yield Explorer
+        </h1>
+        <p className="max-w-3xl text-sm" style={{ color: "var(--text-muted)" }}>
+          Every tracked liquidity pool on Arc Mainnet, ranked by liquidity with fee APR,
+          market cap, age and volume alongside. APR is a pool-level fee annualization computed
+          from 24h volume and the pool&apos;s own fee tier — not a position return, and not
+          investment advice.
+        </p>
+      </section>
+
+      <StatsCards stats={stats} />
+      <CoverageBar stats={stats} status={syncJob} />
+
+      {isEmptyDb ? (
+        <div
+          className="rounded-lg border p-8 text-sm"
+          style={{ borderColor: "var(--color-warn-500)", color: "var(--color-warn-500)" }}
+        >
+          <p className="font-semibold">No pool data has been synced yet.</p>
+          <p className="mt-1 text-xs" style={{ color: "var(--text-muted)" }}>
+            Run <code className="rounded px-1" style={{ background: "var(--surface-raised)" }}>npm run sync</code>{" "}
+            to pull live Arc pools from GeckoTerminal and DexPaprika. Production data is never
+            replaced with demo numbers.
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+      ) : (
+        <>
+          <FilterBar filters={filters} dexes={stats.dexes} resultCount={result.total} />
+
+          <div className="scroll-x rounded-lg border" style={{ borderColor: "var(--border)" }}>
+            <table className="pool-table">
+              <thead>
+                <tr>
+                  <th className="w-12">#</th>
+                  <th>Pool</th>
+                  <th className="text-right">MCAP</th>
+                  <th className="text-right">AGE</th>
+                  <th className="text-right">Est. Fee APR</th>
+                  <th className="text-right">LIQ</th>
+                  <th className="text-right">VOL 24H</th>
+                  <th className="text-right">HOLDERS</th>
+                  <th>Flags</th>
+                </tr>
+              </thead>
+              <tbody>
+                {result.rows.map((row, index) => (
+                  <PoolRowView key={row.poolKey} row={row} rank={(result.page - 1) * result.limit + index + 1} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {result.rows.length === 0 ? (
+            <div
+              className="rounded-lg border p-10 text-center text-sm"
+              style={{ borderColor: "var(--border)", color: "var(--text-muted)" }}
+            >
+              No pools match these filters.
+              <span className="mt-1 block text-xs">
+                Many Arc pools sit below the $10K liquidity floor — try “All” liquidity or clear the
+                search.
+              </span>
+            </div>
+          ) : null}
+
+          <Pagination
+            filters={filters}
+            page={result.page}
+            pageCount={result.pageCount}
+            total={result.total}
+            limit={result.limit}
+          />
+
+          <section className="grid gap-3 pt-2 text-xs md:grid-cols-3" style={{ color: "var(--text-muted)" }}>
+            <p>
+              <span className="font-semibold" style={{ color: "var(--text)" }}>
+                How to read this table
+              </span>
+              <br />
+              Ranking uses the full tracked set, then the requested page is sliced — filters never
+              change what &quot;rank 1&quot; means.
+            </p>
+            <p>
+              <span className="font-semibold" style={{ color: "var(--text)" }}>
+                N/A means unknown
+              </span>
+              <br />
+              A missing metric is never shown as 0. Hover any N/A to see why it is unavailable.
+            </p>
+            <p>
+              <span className="font-semibold" style={{ color: "var(--text)" }}>
+                Coverage
+              </span>
+              <br />
+              GeckoTerminal&apos;s keyless API caps discovery, so tracked pools are a lower bound —
+              not all of Arc. Synced {formatRelative(syncJob?.lastSuccessAt ?? null)}.
+              {" "}
+              <Link href="/methodology" className="underline">
+                Full methodology
+              </Link>
+              .
+            </p>
+          </section>
+        </>
+      )}
     </div>
   );
 }

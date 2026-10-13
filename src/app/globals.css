@@ -1,26 +1,100 @@
 @import "tailwindcss";
 
+/*
+ * ArcPools visual system.
+ * Dark by default (with a light override), dense financial table, one accent
+ * hue. Deliberately not a copy of any third-party site's layout or branding.
+ */
+@theme {
+  --color-ink-950: #06070c;
+  --color-ink-900: #0a0c14;
+  --color-ink-850: #0f121c;
+  --color-ink-800: #151926;
+  --color-ink-700: #1e2433;
+  --color-ink-600: #2b3244;
+  --color-ink-500: #3d465c;
+  --color-mist-400: #6b7794;
+  --color-mist-300: #8d99b5;
+  --color-mist-200: #b9c3d6;
+  --color-mist-100: #e4e9f2;
+  --color-accent-400: #5b8dff;
+  --color-accent-500: #3b6ef5;
+  --color-accent-600: #2b55d4;
+  --color-pos-500: #2fb37a;
+  --color-neg-500: #e0524d;
+  --color-warn-500: #d9a441;
+}
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: dark;
+  --surface: var(--color-ink-900);
+  --surface-raised: var(--color-ink-850);
+  --border: var(--color-ink-700);
+  --text: var(--color-mist-100);
+  --text-muted: var(--color-mist-400);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+html[data-theme="light"] {
+  color-scheme: light;
+  --surface: #ffffff;
+  --surface-raised: #f6f7fa;
+  --border: #e3e7ef;
+  --text: #10131a;
+  --text-muted: #5a6479;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  background: var(--surface);
+  color: var(--text);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-feature-settings: "tnum" 1, "cv05" 1;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Tabular figures everywhere numbers are compared column-wise. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+table.pool-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  min-width: 1080px;
+}
+
+table.pool-table th,
+table.pool-table td {
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+table.pool-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--surface-raised);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+table.pool-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--color-accent-500) 6%, transparent);
+}
+
+.scroll-x {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.na {
+  color: var(--text-muted);
+  font-style: italic;
 }
