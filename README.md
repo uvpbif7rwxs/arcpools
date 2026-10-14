@@ -8,6 +8,18 @@ six metrics next to it: `POOL`, `MCAP`, `AGE`, `Est. Fee APR`, `LIQ`, `VOL 24H`.
 > Independent analytics tool. Not affiliated with, endorsed by, or connected to Circle or Arc.
 > Not investment advice.
 
+## Onchain snapshot registry
+
+`contracts/src/ArcPoolsRegistry.sol` anchors compact receipts for ArcPools dataset snapshots.
+The full pool dataset remains offchain; the contract stores only a snapshot hash, capture time,
+pool count and schema version. Only the deployment wallet can publish receipts, and the contract
+does not hold user funds.
+
+- Network: Arc Mainnet (`5042`)
+- Contract: [`0xF0489c695d7bb4744c574747159f4b5a749B9532`](https://explorer.arc.io/address/0xF0489c695d7bb4744c574747159f4b5a749B9532)
+- Deployment transaction: [`0x3e0ca42a187acd7d32aa1228119e1d7f46cd862fd7bb1d142bc8122748d23560`](https://explorer.arc.io/tx/0x3e0ca42a187acd7d32aa1228119e1d7f46cd862fd7bb1d142bc8122748d23560)
+- Publisher: `0x05e38f5486639079C15Fe35f103505Fba91bd46f`
+
 ---
 
 ## Handoff notes (read this first)
