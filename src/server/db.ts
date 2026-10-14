@@ -53,9 +53,11 @@ CREATE TABLE IF NOT EXISTS tokens (
   decimals        INTEGER,
   image_url       TEXT,
   market_cap_usd  REAL,                       -- NULL = unverified, never FDV fallback
+  market_cap_checked_at TEXT,
   fdv_usd         REAL,
   holders_count   INTEGER,                    -- Phase 2; NULL while unindexed
   holders_updated_at TEXT,
+  holders_checked_at TEXT,
   PRIMARY KEY (chain_id, address)
 );
 
@@ -68,6 +70,7 @@ CREATE TABLE IF NOT EXISTS pool_metrics (
   price_change_24h REAL,
   fee_rate        REAL,                       -- effective LP fee fraction (0.003 = 0.3%)
   fee_source      TEXT,                       -- detail_api | pool_name | unknown
+  fee_checked_at  TEXT,
   apr_24h         REAL,
   apr_7d          REAL,
   apr_method      TEXT,
@@ -108,6 +111,109 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
 );
 `;
 
+function ensureTokenCheckColumns(db: Database.Database): void {
+  const columns = new Set(
+    (db.prepare("PRAGMA table_info(tokens)").all() as { name: string }[]).map((row) => row.name),
+  );
+  if (!columns.has("market_cap_checked_at")) {
+    db.exec("ALTER TABLE tokens ADD COLUMN market_cap_checked_at TEXT");
+  }
+  if (!columns.has("holders_checked_at")) {
+    db.exec("ALTER TABLE tokens ADD COLUMN holders_checked_at TEXT");
+  }
+}
+
+function ensurePoolMetricCheckColumns(db: Database.Database): void {
+  const columns = new Set(
+    (db.prepare("PRAGMA table_info(pool_metrics)").all() as { name: string }[]).map((row) => row.name),
+  );
+  if (!columns.has("fee_checked_at")) {
+    db.exec("ALTER TABLE pool_metrics ADD COLUMN fee_checked_at TEXT");
+  }
+}
+
+/**
+ * One-off repair for rows written before the network-prefix fix.
+ *
+ * GeckoTerminal hands back token ids as "arc_0xabc…", which was stored
+ * verbatim. Its per-token endpoint rejects that form with HTTP 404, so those
+ * rows could never be enriched: 205 of 237 tokens were unreachable and market
+ * cap coverage sat at ~5%. Normalizing the stored address makes the existing
+ * data reachable again without a re-crawl.
+ *
+ * Both forms can be present for the same token, and `tokens.address` is part of
+ * the primary key, so the prefixed row is merged into the bare one first (any
+ * non-null field wins, preferring the row that actually carries data) and only
+ * then deleted. Written to be idempotent: a second open finds nothing to do.
+ */
+function repairTokenAddresses(db: Database.Database): void {
+  const prefixed = db
+    .prepare("SELECT * FROM tokens WHERE address LIKE 'arc_0x%'")
+    .all() as Record<string, unknown>[];
+  if (prefixed.length === 0) return;
+
+  const selectBare = db.prepare("SELECT * FROM tokens WHERE address = ?");
+  const upsert = db.prepare(`
+    INSERT INTO tokens (chain_id, address, name, symbol, decimals, image_url,
+                        market_cap_usd, market_cap_checked_at, fdv_usd,
+                        holders_count, holders_updated_at, holders_checked_at)
+    VALUES (@chain_id, @address, @name, @symbol, @decimals, @image_url,
+            @market_cap_usd, @market_cap_checked_at, @fdv_usd,
+            @holders_count, @holders_updated_at, @holders_checked_at)
+    ON CONFLICT(chain_id, address) DO UPDATE SET
+      name      = COALESCE(excluded.name, tokens.name),
+      symbol    = COALESCE(excluded.symbol, tokens.symbol),
+      decimals  = COALESCE(excluded.decimals, tokens.decimals),
+      image_url = COALESCE(excluded.image_url, tokens.image_url),
+      market_cap_usd = COALESCE(excluded.market_cap_usd, tokens.market_cap_usd),
+      market_cap_checked_at = COALESCE(excluded.market_cap_checked_at, tokens.market_cap_checked_at),
+      fdv_usd        = COALESCE(excluded.fdv_usd, tokens.fdv_usd),
+      holders_count  = COALESCE(excluded.holders_count, tokens.holders_count),
+      holders_updated_at = COALESCE(excluded.holders_updated_at, tokens.holders_updated_at),
+      holders_checked_at = COALESCE(excluded.holders_checked_at, tokens.holders_checked_at)
+  `);
+  const remove = db.prepare("DELETE FROM tokens WHERE address = ?");
+
+  const merge = db.transaction(() => {
+    for (const row of prefixed) {
+      const bare = String(row.address).slice(4);
+      const existing = selectBare.get(bare) as Record<string, unknown> | undefined;
+      // Prefer whichever row actually carries a value for each field.
+      const pick = (a: unknown, b: unknown) =>
+        a === null || a === undefined ? (b ?? null) : a;
+      upsert.run({
+        chain_id: row.chain_id,
+        address: bare,
+        name: pick(row.name, existing?.name),
+        symbol: pick(row.symbol, existing?.symbol),
+        decimals: pick(row.decimals, existing?.decimals),
+        image_url: pick(row.image_url, existing?.image_url),
+        market_cap_usd: pick(row.market_cap_usd, existing?.market_cap_usd),
+        market_cap_checked_at: pick(
+          row.market_cap_checked_at,
+          existing?.market_cap_checked_at,
+        ),
+        fdv_usd: pick(row.fdv_usd, existing?.fdv_usd),
+        holders_count: pick(row.holders_count, existing?.holders_count),
+        holders_updated_at: pick(row.holders_updated_at, existing?.holders_updated_at),
+        holders_checked_at: pick(row.holders_checked_at, existing?.holders_checked_at),
+      });
+      remove.run(row.address);
+    }
+  });
+  merge();
+}
+
+/** Keep pool foreign-key-like token addresses in the same canonical form. */
+function repairPoolTokenAddresses(db: Database.Database): void {
+  db.prepare(
+    "UPDATE pools SET base_token_address = substr(base_token_address, 5) WHERE base_token_address LIKE 'arc_0x%'",
+  ).run();
+  db.prepare(
+    "UPDATE pools SET quote_token_address = substr(quote_token_address, 5) WHERE quote_token_address LIKE 'arc_0x%'",
+  ).run();
+}
+
 export function getDb(): Database.Database {
   if (instance) return instance;
   mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -115,6 +221,10 @@ export function getDb(): Database.Database {
   instance.pragma("journal_mode = WAL");
   instance.pragma("foreign_keys = ON");
   instance.exec(SCHEMA);
+  ensureTokenCheckColumns(instance);
+  ensurePoolMetricCheckColumns(instance);
+  repairTokenAddresses(instance);
+  repairPoolTokenAddresses(instance);
   return instance;
 }
 

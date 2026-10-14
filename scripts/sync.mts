@@ -20,18 +20,20 @@ function arg(name: string, fallback?: number): number | undefined {
 
 const maxPages = arg("pages");
 const detailBudget = arg("detail");
+const cmcTokenBudget = arg("cmc");
 const crossCheck = !process.argv.includes("--no-crosscheck");
 
 console.log(`[sync] db=${dbFilePath()}`);
 const startPage = arg("start");
 console.log(
-  `[sync] pages=${maxPages ?? "auto"} start=${startPage ?? "auto(rotating)"} detail=${detailBudget ?? "auto"} crossCheck=${crossCheck}`,
+  `[sync] pages=${maxPages ?? "auto"} start=${startPage ?? "auto(rotating)"} detail=${detailBudget ?? "auto"} cmc=${cmcTokenBudget ?? "auto"} crossCheck=${crossCheck}`,
 );
 
 const started = Date.now();
 const result = await runSync({
   maxPages,
   detailBudget,
+  cmcTokenBudget,
   startPage,
   crossCheck,
 });
@@ -41,8 +43,14 @@ console.log(`  pages fetched      : ${result.pagesFetched} (rotating start page 
 console.log(`  pools discovered   : ${result.discovered}`);
 console.log(`  rows upserted      : ${result.upserted}`);
 console.log(`  fee detail calls   : ${result.detailCalls}`);
+console.log(`  Arc RPC symbols    : ${result.rpcTokenCalls}`);
 console.log(`  pools with flags   : ${result.flagged}`);
 console.log(`  cross-check pools  : ${result.crossCheck.pools}${result.crossCheck.error ? ` (error: ${result.crossCheck.error})` : ""}`);
+console.log(`  DexScreener matched: ${result.dexScreener.matched} (${result.dexScreener.refreshedStale} stale refreshed, ${result.dexScreener.marketCapsUpdated} MCAP)`);
+console.log(`  missing volume fixed: ${result.missingVolume.updated}/${result.missingVolume.attempted}`);
+console.log(
+  `  CMC token enrichment: ${result.coinMarketCap.attempted} tried, ${result.coinMarketCap.marketCapsUpdated} MCAP, ${result.coinMarketCap.holdersUpdated} holders`,
+);
 
 for (const warning of result.warnings) console.log(`  ! ${warning}`);
 

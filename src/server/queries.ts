@@ -12,11 +12,11 @@ export const SORTABLE = {
   apr: "m.apr_24h",
   age: "p.pool_created_at",
   vol24h: "m.volume_24h_usd",
-  holders: "t.holders_count",
   updated: "m.updated_at",
 } as const;
 
 export type SortKey = keyof typeof SORTABLE;
+export type AppliedSort = SortKey | "default";
 
 export const DEFAULT_MIN_LIQ_USD = 10_000;
 
@@ -137,13 +137,15 @@ export type PoolsPage = {
   page: number;
   limit: number;
   pageCount: number;
-  sort: SortKey;
+  sort: AppliedSort;
   order: "asc" | "desc";
 };
 
 export function queryPools(query: PoolQuery = {}): PoolsPage {
   const db = getDb();
-  const sortKey: SortKey = (query.sort && query.sort in SORTABLE ? query.sort : "liq") as SortKey;
+  const sortKey: AppliedSort = query.sort && query.sort in SORTABLE
+    ? (query.sort as SortKey)
+    : "default";
   const order = query.order === "asc" ? "asc" : "desc";
   const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
   const page = Math.max(query.page ?? 1, 1);
@@ -154,13 +156,23 @@ export function queryPools(query: PoolQuery = {}): PoolsPage {
               LEFT JOIN tokens t ON t.chain_id = p.chain_id AND t.address = p.base_token_address ${where}`)
     .get(params) as { n: number };
 
-  const column = SORTABLE[sortKey];
   const direction = order === "asc" ? "ASC" : "DESC";
-  // Unknown values always sort last: they are the absence of data, not a value.
+  const defaultCompleteness = `(
+    p.base_symbol IS NULL OR p.quote_symbol IS NULL OR
+    t.market_cap_usd IS NULL OR p.pool_created_at IS NULL OR
+    m.apr_24h IS NULL OR m.liquidity_usd IS NULL OR m.volume_24h_usd IS NULL
+  )`;
+  const orderBy = sortKey === "default"
+    ? `${defaultCompleteness} ASC,
+       (m.volume_24h_usd IS NULL) ASC, m.volume_24h_usd DESC, p.pool_key ASC`
+    : `(${SORTABLE[sortKey]} IS NULL) ASC,
+       ${SORTABLE[sortKey]} ${direction}, p.pool_key ASC`;
+  // The default view prioritizes complete rows, then ranks those rows by 24h
+  // volume. Explicit column sorts still keep that column's unknowns last.
   const rows = db
     .prepare(
       `${BASE_SELECT} ${where}
-       ORDER BY (${column} IS NULL) ASC, ${column} ${direction}, p.pool_key ASC
+       ORDER BY ${orderBy}
        LIMIT @limit OFFSET @offset`,
     )
     .all({ ...params, limit, offset: (page - 1) * limit }) as Omit<PoolRow, "flags">[];
@@ -221,6 +233,8 @@ export type Stats = {
   } | null;
   poolsWithApr: number;
   poolsWithHolders: number;
+  poolsWithMcap: number;
+  poolsWithLiquidity: number;
   dexes: { id: string; pools: number }[];
   updatedAt: string | null;
   stalePools: number;
@@ -237,6 +251,8 @@ export function getStats(): Stats {
          SUM(m.volume_24h_usd) AS volume24h,
          SUM(CASE WHEN m.apr_24h IS NOT NULL THEN 1 ELSE 0 END) AS withApr,
          SUM(CASE WHEN t.holders_count IS NOT NULL THEN 1 ELSE 0 END) AS withHolders,
+         SUM(CASE WHEN t.market_cap_usd IS NOT NULL THEN 1 ELSE 0 END) AS withMcap,
+         SUM(CASE WHEN m.liquidity_usd IS NOT NULL THEN 1 ELSE 0 END) AS withLiquidity,
          SUM(CASE WHEN m.stale = 1 THEN 1 ELSE 0 END) AS stale,
          MAX(m.updated_at) AS updatedAt
        FROM pools p
@@ -249,6 +265,8 @@ export function getStats(): Stats {
       volume24h: number | null;
       withApr: number | null;
       withHolders: number | null;
+      withMcap: number | null;
+      withLiquidity: number | null;
       stale: number | null;
       updatedAt: string | null;
     };
@@ -281,6 +299,8 @@ export function getStats(): Stats {
     highestApr: best ?? null,
     poolsWithApr: Number(totals.withApr ?? 0),
     poolsWithHolders: Number(totals.withHolders ?? 0),
+    poolsWithMcap: Number(totals.withMcap ?? 0),
+    poolsWithLiquidity: Number(totals.withLiquidity ?? 0),
     stalePools: Number(totals.stale ?? 0),
     dexes,
     updatedAt: totals.updatedAt ?? null,

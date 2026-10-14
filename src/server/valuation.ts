@@ -25,6 +25,8 @@ export type SanitizedValues = {
   marketCapUsd: number | null;
   fdvUsd: number | null;
   reason: string | null;
+  /** Which rule fired, so the UI can label the flag honestly. */
+  grade: "ok" | "above_fdv" | "discarded";
 };
 
 export function sanitizeValuation(
@@ -35,12 +37,12 @@ export function sanitizeValuation(
   const fdv = fdvUsd !== null && fdvUsd > 0 ? fdvUsd : null;
 
   if (mcap === null) {
-    return { marketCapUsd: null, fdvUsd: fdv, reason: null };
+    return { marketCapUsd: null, fdvUsd: fdv, reason: null, grade: "ok" };
   }
 
   if (fdv === null) {
     // No FDV to contradict it; the figure stands on its own.
-    return { marketCapUsd: mcap, fdvUsd: null, reason: null };
+    return { marketCapUsd: mcap, fdvUsd: null, reason: null, grade: "ok" };
   }
 
   if (mcap > fdv * FDV_DISCARD_RATIO) {
@@ -48,6 +50,7 @@ export function sanitizeValuation(
       marketCapUsd: null,
       fdvUsd: null,
       reason: `Upstream market cap ($${Math.round(mcap).toLocaleString("en-US")}) exceeds its own FDV ($${Math.round(fdv).toLocaleString("en-US")}) by more than 2x, which is impossible; both figures were discarded rather than shown.`,
+      grade: "discarded",
     };
   }
 
@@ -56,8 +59,9 @@ export function sanitizeValuation(
       marketCapUsd: mcap,
       fdvUsd: fdv,
       reason: `Market cap ($${Math.round(mcap).toLocaleString("en-US")}) sits above the reported FDV ($${Math.round(fdv).toLocaleString("en-US")}); likely an upstream supply mismatch — treat the cap with care.`,
+      grade: "above_fdv",
     };
   }
 
-  return { marketCapUsd: mcap, fdvUsd: fdv, reason: null };
+  return { marketCapUsd: mcap, fdvUsd: fdv, reason: null, grade: "ok" };
 }

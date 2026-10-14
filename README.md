@@ -3,7 +3,7 @@
 **Arc Liquidity & Yield Explorer** — an Arc Mainnet liquidity-pool leaderboard.
 
 ArcPools ranks every tracked liquidity pool on Arc (chain ID 5042) by liquidity and shows
-seven metrics next to it: `POOL`, `MCAP`, `AGE`, `Est. Fee APR`, `LIQ`, `VOL 24H`, `HOLDERS`.
+six metrics next to it: `POOL`, `MCAP`, `AGE`, `Est. Fee APR`, `LIQ`, `VOL 24H`.
 
 > Independent analytics tool. Not affiliated with, endorsed by, or connected to Circle or Arc.
 > Not investment advice.
@@ -11,6 +11,13 @@ seven metrics next to it: `POOL`, `MCAP`, `AGE`, `Est. Fee APR`, `LIQ`, `VOL 24H
 ---
 
 ## Handoff notes (read this first)
+
+> **New to this project? Read [`docs/HANDOFF.md`](docs/HANDOFF.md) first.**
+> It contains the five non-negotiable data rules, the full architecture, measured coverage for
+> every metric, the ranked list of open problems, the invariants the tests enforce, and an
+> explicit "do not do these" list. It is written for an agent with no prior context.
+> Upstream API behaviour is measured and documented separately in
+> [`docs/UPSTREAM_APIS.md`](docs/UPSTREAM_APIS.md).
 
 **What this project is.** A Next.js site that ranks Arc liquidity pools. It is *not* related to any
 other folder in the parent directory — ignore anything sitting alongside it.
@@ -25,6 +32,15 @@ npm install && npm run sync && npm run dev
 
 **`data/arcpools.db` is git-ignored.** If you received this project via git or an archive, the
 database is not there and the app starts empty. That is intentional — recreate it with `npm run sync`.
+
+**Do not re-litigate the upstream API questions.** Every measured fact about GeckoTerminal,
+DexPaprika, DexScreener and CoinMarketCap — which fields exist and which rate limits apply — is written up in
+[`docs/UPSTREAM_APIS.md`](docs/UPSTREAM_APIS.md). Read that before changing an adapter, and
+prefer the behaviour recorded there over the vendors' published docs, which disagree with reality.
+In short: GeckoTerminal v2 is keyless and ignores `x-cg-pro-api-key`; DexPaprika's `fee` field is
+always null and its `/networks/{chain}/pools` route is removed; CoinGecko reports no circulating
+supply for most Arc tokens; CoinMarketCap's keyless DEX endpoints are used as a clearly labelled
+fallback for market cap and holder count.
 
 **Next.js here is v16, which breaks from older conventions.** Route segment config such as
 `export const dynamic = "force-dynamic"` is rejected while `cacheComponents` is enabled; this
@@ -108,6 +124,8 @@ Client requests never touch a third-party API directly. All upstream keys stay s
 | --- | --- | --- |
 | [GeckoTerminal](https://api.geckoterminal.com/api/v2/networks/arc/pools) | liquidity, 24h volume, MCAP/FDV, creation time | list endpoint returns **no fee**; fee only on the per-pool detail endpoint; keyless tier rejects page > 10 and rate-limits to ~30 req/min |
 | [DexPaprika](https://api.dexpaprika.com/networks/arc/pools/search) | discovery, 7d volume, cross-validation | `/networks/arc/pools` now returns `endpoint_removed`; the `search` endpoint works; `fee` is null and `volume_usd_24h` can be 0 — so it is **never** trusted for fees |
+| [DexScreener](https://api.dexscreener.com/latest/dex/pairs/arc/) | keyless refresh of known-pool liquidity, 24h volume and estimated MCAP | up to 30 pool ids/request at 300 req/min; never trusted for fees, and MCAP is labelled estimated because it commonly equals FDV |
+| [CoinMarketCap](https://pro-api.coinmarketcap.com/public-api/v1/dex/) | estimated token MCAP and holder count | documented keyless endpoints; high-liquidity missing tokens are refreshed gradually and estimated MCAP is labelled |
 | [Arc Explorer](https://explorer.arc.io/) | contract links | — |
 
 Findings from those probes shaped the code, and are worth knowing before changing it:
@@ -149,7 +167,7 @@ Findings from those probes shaped the code, and are worth knowing before changin
 | Est. Fee APR | `24h volume × effective LP fee × 365 ÷ liquidity × 100` | fee rate unverifiable, or liquidity/volume missing |
 | LIQ | combined USD value of the pool's assets — the ranking metric | upstream reports nothing usable |
 | VOL 24H | rolling 24h volume for that pool | upstream reports nothing usable |
-| HOLDERS | base-token non-zero-balance addresses | **always, for now** — needs an on-chain Arc ERC-20 index; also *not* the number of LP providers |
+| HOLDERS | base-token holder addresses, shown on pool detail pages | upstream has not indexed that token yet; also *not* the number of LP providers |
 
 `$100,000 volume ÷ $500,000 liquidity × 0.30% × 365 = 21.90%` is pinned by a unit test so the fee
 pipeline cannot silently drift.
@@ -271,17 +289,18 @@ tests/apr.test.ts           APR unit tests
 
 ## Known limitations
 
-- **HOLDERS is N/A everywhere.** No connected source exposes Arc ERC-20 holder counts; this needs an
-  on-chain index (Phase 2).
+- **HOLDERS coverage grows gradually.** CoinMarketCap's keyless endpoint is one token per request,
+  so each sync prioritizes a bounded set of high-liquidity missing/stale tokens.
 - **Coverage is a lower bound.** GeckoTerminal's keyless tier caps discovery at 10 pages × 20 pools,
   so "Tracked Pools" is not a census of Arc.
-- **Fee verification is partial.** Only the top `SYNC_DETAIL_BUDGET` pools get a detail-endpoint fee
-  per sync; the rest rely on the pool name and are labelled `estimated`.
+- **Fee verification is partial.** The `SYNC_DETAIL_BUDGET` detail calls prioritize missing 24h
+  volume and unverified fees, then liquidity rank; the rest rely on the pool name and are labelled
+  `estimated`.
 - **7D APR needs history.** It stays N/A until the snapshot table has a full 7-day window.
 - **No analytics, alerts, watchlists or wallet tools** — those are Phases 3–4 and are deliberately
   not faked.
 
 ## License & data attribution
 
-Pool data comes from GeckoTerminal and DexPaprika; APR and all derived metrics are computed by
-ArcPools. Review each provider's terms and rate limits before commercial use.
+Pool data comes from GeckoTerminal, DexPaprika, DexScreener and CoinMarketCap; APR and all derived metrics are
+computed by ArcPools. Review each provider's terms and rate limits before commercial use.

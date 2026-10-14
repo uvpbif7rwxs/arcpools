@@ -8,7 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { computeApr24h, computeApr7d } from "../src/server/apr.ts";
-import { rotatingStartPage } from "../src/server/sync.ts";
+import { rotatingStartPage, syncStartPage } from "../src/server/sync.ts";
 import { sanitizeValuation } from "../src/server/valuation.ts";
 import { parseFeeFromName, percentToFraction } from "../src/server/sources/geckoterminal.ts";
 
@@ -177,6 +177,15 @@ test("page rotation is stable within a window and never out of range", () => {
 
 test("single-page config always starts at page 1", () => {
   assert.equal(rotatingStartPage(1, new Date()), 1);
+});
+
+test("the default sync rotation covers all upstream pages despite a three-page run budget", () => {
+  const pages = new Set<number>();
+  const start = new Date("2026-10-13T00:00:00Z");
+  for (let i = 0; i < 10; i++) {
+    pages.add(syncStartPage(new Date(start.getTime() + i * 10 * 60_000)));
+  }
+  assert.equal(pages.size, 10);
 });
 
 // ---- valuation sanity --------------------------------------------------------

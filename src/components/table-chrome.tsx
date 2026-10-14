@@ -1,17 +1,28 @@
 import Link from "next/link";
-import type { PoolRow } from "@/server/types";
 import { buildHref, type FilterState } from "./filter-bar";
 
-const COLUMNS: { key: string; label: string; className?: string }[] = [
-  { key: "liq", label: "LIQ", className: "text-right" },
-  { key: "mcap", label: "MCAP", className: "text-right" },
-  { key: "apr", label: "Est. Fee APR", className: "text-right" },
-  { key: "vol24h", label: "VOL 24H", className: "text-right" },
-  { key: "age", label: "AGE", className: "text-right" },
-  { key: "holders", label: "HOLDERS", className: "text-right" },
+/**
+ * Column order is fixed by the leaderboard's display fields and matches the
+ * cell order rendered by `PoolRowView` (POOL, MCAP, AGE, APR, LIQ, VOL 24H; no HOLDERS column).
+ *
+ * These two lists must stay in step. They drifted once during a redesign — the
+ * header was reordered while the body was not — which silently rendered every
+ * row's market cap under a "LIQ" heading. `tests/columns.test.ts` asserts the
+ * order so the mismatch cannot come back quietly.
+ */
+const COLUMNS: { key: string; label: string; hint: string }[] = [
+  { key: "mcap", label: "MCAP", hint: "Base-token market cap; estimated values are labelled" },
+  { key: "age", label: "AGE", hint: "Time since on-chain pool creation" },
+  { key: "apr", label: "Est. Fee APR", hint: "24h volume × effective LP fee × 365 ÷ liquidity" },
+  { key: "liq", label: "LIQ", hint: "Combined USD value of the pool's assets — the ranking metric" },
+  { key: "vol24h", label: "VOL 24H", hint: "Rolling 24h volume for this pool" },
 ];
 
-/** Column headers are links, so every sort state is a real, shareable URL. */
+/**
+ * Column headers are links, so every sort state is a real, shareable URL and the
+ * back button works. `aria-sort` is set on the active column so the sort state is
+ * available to assistive tech, not just visually.
+ */
 export function SortableHeader({
   filters,
   basePath = "/",
@@ -35,21 +46,34 @@ export function SortableHeader({
 
   return (
     <>
-      <th>Pool</th>
+      <th scope="col" className="w-12">
+        #
+      </th>
+      <th scope="col">Pool</th>
       {COLUMNS.map((column) => {
         const active = filters.sort === column.key;
         return (
-          <th key={column.key} className={column.className}>
-            <Link href={href(column.key)} className="inline-flex items-center gap-1 hover:underline">
+          <th
+            key={column.key}
+            scope="col"
+            className="text-right"
+            aria-sort={active ? (filters.order === "asc" ? "ascending" : "descending") : "none"}
+          >
+            <Link
+              href={href(column.key)}
+              title={column.hint}
+              className={`inline-flex items-center gap-1 underline-offset-2 hover:text-fg hover:underline ${
+                active ? "text-accent" : ""
+              }`}
+            >
               {column.label}
-              <span style={{ opacity: active ? 1 : 0.25 }}>
-                {active ? (filters.order === "asc" ? "▲" : "▼") : "▲"}
+              <span aria-hidden className={active ? "text-accent" : "text-faint opacity-40"}>
+                {active ? (filters.order === "asc" ? "▲" : "▼") : "▼"}
               </span>
             </Link>
           </th>
         );
       })}
-      <th>Flags</th>
     </>
   );
 }
@@ -69,8 +93,8 @@ export function Pagination({
 }) {
   if (pageCount <= 1) {
     return (
-      <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-        <span className="tnum">{total}</span> pools
+      <p className="text-xs text-muted">
+        <span className="tnum text-fg">{total}</span> pools
       </p>
     );
   }
@@ -80,22 +104,19 @@ export function Pagination({
   const window: number[] = [];
   for (let i = Math.max(1, page - 2); i <= Math.min(pageCount, page + 2); i++) window.push(i);
 
-  const linkStyle = {
-    border: "1px solid var(--border)",
-    color: "var(--text-muted)",
-  } as const;
+  const pageLink = "rounded-md border border-line px-2 py-1 text-muted transition-colors hover:border-line-strong hover:text-fg";
 
   return (
-    <div className="flex flex-wrap items-center gap-2 text-xs">
-      <span style={{ color: "var(--text-muted)" }}>
-        <span className="tnum">
+    <nav aria-label="Pagination" className="flex flex-wrap items-center gap-2 text-xs">
+      <span className="text-muted">
+        <span className="tnum text-fg">
           {from}–{to}
         </span>{" "}
-        of <span className="tnum">{total}</span>
+        of <span className="tnum text-fg">{total}</span>
       </span>
       <div className="flex items-center gap-1">
         {page > 1 ? (
-          <Link href={buildHref(filters, { page: String(page - 1) })} className="rounded px-2 py-1" style={linkStyle}>
+          <Link href={buildHref(filters, { page: String(page - 1) })} className={pageLink}>
             Prev
           </Link>
         ) : null}
@@ -103,24 +124,22 @@ export function Pagination({
           <Link
             key={n}
             href={buildHref(filters, { page: String(n) })}
-            className="rounded px-2 py-1"
-            style={
+            aria-current={n === page ? "page" : undefined}
+            className={
               n === page
-                ? { ...linkStyle, color: "white", background: "var(--color-accent-500)" }
-                : linkStyle
+                ? "tnum rounded-md border border-accent/50 bg-accent/15 px-2 py-1 font-semibold text-accent"
+                : `tnum ${pageLink}`
             }
           >
             {n}
           </Link>
         ))}
         {page < pageCount ? (
-          <Link href={buildHref(filters, { page: String(page + 1) })} className="rounded px-2 py-1" style={linkStyle}>
+          <Link href={buildHref(filters, { page: String(page + 1) })} className={pageLink}>
             Next
           </Link>
         ) : null}
       </div>
-    </div>
+    </nav>
   );
 }
-
-export type { PoolRow };

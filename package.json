@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "sync": "tsx scripts/sync.mts",
+    "sync:dexscreener": "tsx scripts/sync-dexscreener.mts",
     "test": "tsx --test tests/*.test.ts",
     "test:watch": "tsx --test --watch tests/*.test.ts"
   },

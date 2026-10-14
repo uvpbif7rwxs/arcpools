@@ -1,11 +1,12 @@
 import Link from "next/link";
+import { RotateCcw, SlidersHorizontal } from "lucide-react";
 
 /**
  * Server-rendered filter bar.
  *
- * Filters live in the URL, so a filtered leaderboard is shareable and the
- * browser back button works. Sorting and filtering are applied in SQL before
- * pagination — the ranking always reflects the whole tracked set.
+ * Filters live in the URL, so a filtered leaderboard is shareable and the back
+ * button works. Sorting and filtering are applied in SQL before pagination — the
+ * ranking always reflects the whole tracked set, never just the current page.
  */
 
 const LIQ_OPTIONS = [
@@ -53,7 +54,7 @@ export function readFilters(sp: Record<string, string | string[] | undefined>): 
     maxAgeHours: first("maxAgeHours"),
     dex: first("dex"),
     search: first("search"),
-    sort: first("sort", "liq"),
+    sort: first("sort", "default"),
     order: first("order", "desc"),
     page: first("page", "1"),
   };
@@ -67,18 +68,22 @@ export function buildHref(filters: Partial<FilterState>, overrides: Partial<Filt
   if (merged.minApr) params.set("minApr", merged.minApr);
   if (merged.maxAgeHours) params.set("maxAgeHours", merged.maxAgeHours);
   if (merged.dex) params.set("dex", merged.dex);
-  if (merged.sort && merged.sort !== "liq") params.set("sort", merged.sort);
+  if (merged.sort && merged.sort !== "default") params.set("sort", merged.sort);
   if (merged.order && merged.order !== "desc") params.set("order", merged.order);
   if (merged.page && merged.page !== "1") params.set("page", merged.page);
   const qs = params.toString();
   return qs ? `/?${qs}` : "/";
 }
 
-const selectStyle = {
-  background: "var(--surface-raised)",
-  border: "1px solid var(--border)",
-  color: "var(--text)",
-} as const;
+/** A labelled control. The label is paired to the control, not just nearby. */
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[11px] font-medium uppercase tracking-[0.05em] text-faint">{label}</span>
+      {children}
+    </label>
+  );
+}
 
 export function FilterBar({
   filters,
@@ -93,60 +98,66 @@ export function FilterBar({
     filters.search || filters.minApr || filters.maxAgeHours || filters.dex || filters.minLiq !== "10000";
 
   return (
-    <form
-      action="/"
-      method="get"
-      className="flex flex-wrap items-end gap-3 rounded-lg border p-3"
-      style={{ borderColor: "var(--border)", background: "var(--surface-raised)" }}
-    >
-      <label className="flex flex-col gap-1 text-xs" style={{ color: "var(--text-muted)" }}>
-        Search
+    <form action="/" method="get" className="panel flex flex-wrap items-end gap-3 p-4">
+      <div className="flex w-full flex-wrap items-center gap-2 border-b border-line pb-2.5">
+        <SlidersHorizontal aria-hidden className="h-4 w-4 text-accent" />
+        <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-fg">Filters</span>
+        <span className="text-[11px] text-muted">
+          Default view: complete data first · 24H volume ↓ · liquidity ≥ $10K
+        </span>
+        {active ? (
+          <Link
+            href="/"
+            className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted underline-offset-2 hover:text-fg hover:underline"
+          >
+            <RotateCcw aria-hidden className="h-3 w-3" />
+            Reset
+          </Link>
+        ) : null}
+      </div>
+
+      <Field label="Search">
         <input
           type="search"
           name="search"
           defaultValue={filters.search}
-          placeholder="Symbol, token or pool address"
-          className="w-56 rounded-md px-2.5 py-1.5 text-sm outline-none"
-          style={selectStyle}
+          placeholder="Symbol, name, token address"
+          className="field w-64"
         />
-      </label>
+      </Field>
 
-      <label className="flex flex-col gap-1 text-xs" style={{ color: "var(--text-muted)" }}>
-        Min liquidity
-        <select name="minLiq" defaultValue={filters.minLiq} className="rounded-md px-2.5 py-1.5 text-sm" style={selectStyle}>
+      <Field label="Min liquidity">
+        <select name="minLiq" defaultValue={filters.minLiq} className="field">
           {LIQ_OPTIONS.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
           ))}
         </select>
-      </label>
+      </Field>
 
-      <label className="flex flex-col gap-1 text-xs" style={{ color: "var(--text-muted)" }}>
-        Est. fee APR
-        <select name="minApr" defaultValue={filters.minApr} className="rounded-md px-2.5 py-1.5 text-sm" style={selectStyle}>
+      <Field label="Est. fee APR">
+        <select name="minApr" defaultValue={filters.minApr} className="field">
           {APR_OPTIONS.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
           ))}
         </select>
-      </label>
+      </Field>
 
-      <label className="flex flex-col gap-1 text-xs" style={{ color: "var(--text-muted)" }}>
-        Pool age
-        <select name="maxAgeHours" defaultValue={filters.maxAgeHours} className="rounded-md px-2.5 py-1.5 text-sm" style={selectStyle}>
+      <Field label="Pool age">
+        <select name="maxAgeHours" defaultValue={filters.maxAgeHours} className="field">
           {AGE_OPTIONS.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
           ))}
         </select>
-      </label>
+      </Field>
 
-      <label className="flex flex-col gap-1 text-xs" style={{ color: "var(--text-muted)" }}>
-        DEX
-        <select name="dex" defaultValue={filters.dex} className="rounded-md px-2.5 py-1.5 text-sm" style={selectStyle}>
+      <Field label="DEX">
+        <select name="dex" defaultValue={filters.dex} className="field max-w-52">
           <option value="">All venues</option>
           {dexes.map((dex) => (
             <option key={dex.id} value={dex.id}>
@@ -154,28 +165,18 @@ export function FilterBar({
             </option>
           ))}
         </select>
-      </label>
+      </Field>
 
-      <input type="hidden" name="sort" value={filters.sort} />
+      {filters.sort !== "default" ? <input type="hidden" name="sort" value={filters.sort} /> : null}
       <input type="hidden" name="order" value={filters.order} />
 
-      <button
-        type="submit"
-        className="rounded-md px-3.5 py-1.5 text-sm font-medium text-white"
-        style={{ background: "var(--color-accent-500)" }}
-      >
+      <button type="submit" className="btn btn-primary">
         Apply
       </button>
-      {active ? (
-        <Link href="/" className="rounded-md px-2.5 py-1.5 text-sm underline" style={{ color: "var(--text-muted)" }}>
-          Reset
-        </Link>
-      ) : null}
-
-      <span className="ml-auto text-xs" style={{ color: "var(--text-muted)" }}>
-        <span className="tnum">{resultCount}</span> pools
+      <span className="ml-auto text-xs text-muted">
+        <span className="tnum text-fg">{resultCount}</span> pools
+        {active ? <span className="text-faint"> · filtered</span> : null}
       </span>
     </form>
   );
 }
-

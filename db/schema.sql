@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS pool_metrics (
   price_change_24h NUMERIC,
   fee_rate         NUMERIC,           -- effective LP fee fraction, 0.003 = 0.3%
   fee_source       TEXT,              -- detail_api | pool_name | unknown
+  fee_checked_at   TIMESTAMPTZ,
   apr_24h          NUMERIC,
   apr_7d           NUMERIC,
   apr_method       TEXT,

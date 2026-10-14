@@ -13,6 +13,7 @@ import {
   ARC_CHAIN_ID,
   ARC_NETWORK_ID,
   canonicalDexId,
+  stripNetworkPrefix,
   type DiscoveredPool,
   type PoolIdentity,
   type PoolMetrics,
@@ -45,6 +46,7 @@ type GtPoolResource = {
 /** Single-resource shape returned by the pool/token detail endpoints. */
 type GtSingleResponse = {
   data?: GtPoolResource;
+  included?: { id: string; type: string; attributes?: Record<string, unknown> }[];
   errors?: { code: number; title: string; detail?: string }[];
 };
 
@@ -121,10 +123,10 @@ function toIdentity(
   const { identifier, kind } = classifyIdentifier(rawId);
   const relationships = pool.relationships ?? {};
   const baseAddress = relationships.base_token?.data?.id
-    ? String(relationships.base_token.data.id).toLowerCase()
+    ? stripNetworkPrefix(String(relationships.base_token.data.id))
     : null;
   const quoteAddress = relationships.quote_token?.data?.id
-    ? String(relationships.quote_token.data.id).toLowerCase()
+    ? stripNetworkPrefix(String(relationships.quote_token.data.id))
     : null;
 
   const dexId = dexIdOf(relationships.dex?.data?.id, identifier);
@@ -207,7 +209,7 @@ export async function fetchPoolsPage(
   }
   const resources = data.data ?? [];
   const included = new Map(
-    (data.included ?? []).map((item) => [String(item.id).toLowerCase(), item.attributes ?? {}]),
+    (data.included ?? []).map((item) => [stripNetworkPrefix(String(item.id)), item.attributes ?? {}]),
   );
 
   const pools: DiscoveredPool[] = [];
@@ -222,7 +224,7 @@ export async function fetchPoolsPage(
     });
   }
 
-  return { pools, hasMore: resources.length >= 20 && page < GT_MAX_PAGE, fetchedAt };
+  return { pools, hasMore: resources.length >= 20, fetchedAt };
 }
 
 /**
@@ -232,6 +234,11 @@ export async function fetchPoolsPage(
 export async function fetchPoolDetail(
   identifier: string,
 ): Promise<{
+  baseSymbol: string | null;
+  baseTokenAddress: string | null;
+  quoteSymbol: string | null;
+  quoteTokenAddress: string | null;
+  feeTierLabel: string | null;
   feeRate: number | null;
   liquidityUsd: number | null;
   volume24hUsd: number | null;
@@ -242,14 +249,23 @@ export async function fetchPoolDetail(
   updatedAt: string;
 } | null> {
   const { data, fetchedAt } = await fetchJson<GtSingleResponse>(
-    `${BASE}/networks/${ARC_NETWORK_ID}/pools/${identifier}`,
+    `${BASE}/networks/${ARC_NETWORK_ID}/pools/${identifier}?include=base_token,quote_token,dex`,
     { minIntervalMs: MIN_INTERVAL_MS, retries: 2, headers: header() },
   );
   const resource = data.data;
   if (!resource?.attributes) return null;
   const attributes = resource.attributes;
+  const included = new Map(
+    (data.included ?? []).map((item) => [stripNetworkPrefix(String(item.id)), item.attributes ?? {}]),
+  );
+  const identity = toIdentity(resource, included);
   const volume = (attributes.volume_usd ?? {}) as Record<string, unknown>;
   return {
+    baseSymbol: identity?.baseSymbol ?? null,
+    baseTokenAddress: identity?.baseTokenAddress ?? null,
+    quoteSymbol: identity?.quoteSymbol ?? null,
+    quoteTokenAddress: identity?.quoteTokenAddress ?? null,
+    feeTierLabel: identity?.feeTierLabel ?? null,
     feeRate: percentToFraction(attributes.pool_fee_percentage),
     liquidityUsd: positive(attributes.reserve_in_usd),
     volume24hUsd: positive(volume.h24),
@@ -265,10 +281,16 @@ export async function fetchPoolDetail(
 /**
  * Token metadata for pools discovered through DexPaprika: its search endpoint
  * returns token ids only (no symbol/name), which would leave rows with blank
- * pair names. Budgeted by the caller — one rate-limit slot per token.
+ * pair names. This is also the only endpoint that can supply a market cap for a
+ * token the pool list left null. Budgeted by the caller — one rate-limit slot
+ * per token.
+ *
+ * The address is normalized on the way in because rows persisted before the
+ * network-prefix fix still carry the "arc_0x…" form, which this endpoint
+ * rejects with 404.
  */
 export async function fetchTokenMetadata(
-  address: string,
+  rawAddress: string,
 ): Promise<{
   address: string;
   name: string | null;
@@ -278,6 +300,7 @@ export async function fetchTokenMetadata(
   marketCapUsd: number | null;
   fdvUsd: number | null;
 } | null> {
+  const address = stripNetworkPrefix(rawAddress);
   const { data } = await fetchJson<GtSingleResponse>(
     `${BASE}/networks/${ARC_NETWORK_ID}/tokens/${address}`,
     { minIntervalMs: MIN_INTERVAL_MS, retries: 2, headers: header() },

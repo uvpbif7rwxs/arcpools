@@ -1,12 +1,37 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import Link from "next/link";
+import { BrandMark } from "@/components/brand-mark";
+import { ThemeToggle, THEME_BOOTSTRAP } from "@/components/theme-toggle";
+import { BRAND, BRAND_COLORS } from "@/lib/brand";
 import "./globals.css";
+
+const SITE_DESCRIPTION =
+  "Independent Arc liquidity pool leaderboard: POOL, MCAP, AGE, APR, LIQ and VOL 24H for every tracked Arc liquidity pool. Not affiliated with Circle or Arc.";
 
 export const metadata: Metadata = {
   title: "ArcPools — Arc Liquidity & Yield Explorer",
-  description:
-    "Independent Arc liquidity pool leaderboard: POOL, MCAP, AGE, APR, LIQ, VOL 24H and HOLDERS for every tracked Arc liquidity pool. Not affiliated with Circle or Arc.",
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "https://arcpools.website"),
+  description: SITE_DESCRIPTION,
+  applicationName: BRAND.name,
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? `https://${BRAND.domain}`),
+  openGraph: {
+    type: "website",
+    siteName: BRAND.name,
+    title: "ArcPools — Arc Liquidity & Yield Explorer",
+    description: SITE_DESCRIPTION,
+    url: `https://${BRAND.domain}`,
+  },
+  twitter: {
+    card: "summary",
+    title: "ArcPools — Arc Liquidity & Yield Explorer",
+    description: SITE_DESCRIPTION,
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: dark)", color: BRAND_COLORS.canvas },
+    { media: "(prefers-color-scheme: light)", color: "#f5f7fc" },
+  ],
 };
 
 const NAV = [
@@ -17,65 +42,95 @@ const NAV = [
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" data-theme="dark">
-      <body className="min-h-screen antialiased">
-        <header className="border-b" style={{ borderColor: "var(--border)" }}>
-          <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-x-6 gap-y-3 px-4 py-4">
-            <Link href="/" className="flex items-baseline gap-2">
-              <span className="text-lg font-semibold tracking-tight">ArcPools</span>
-              <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-                Arc Liquidity &amp; Yield Explorer
+    <html lang="en" data-theme="dark" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_BOOTSTRAP }} />
+      </head>
+      <body className="flex min-h-screen flex-col antialiased">
+        <a
+          href="#main"
+          className="sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-50 focus:rounded-md focus:bg-surface focus:px-3 focus:py-2 focus:text-sm focus:text-fg"
+        >
+          Skip to content
+        </a>
+
+        <header className="sticky top-0 z-40 border-b border-line bg-canvas/85 backdrop-blur-md">
+          <div className="mx-auto flex w-full max-w-[1400px] items-center gap-4 px-4 py-2.5">
+            <Link href="/" className="flex shrink-0 items-center gap-2" aria-label={`${BRAND.name} home`}>
+              <BrandMark size={28} title={null} />
+              <span className="flex flex-col leading-none">
+                <span className="text-[15px] font-bold tracking-[-0.01em] text-fg">
+                  {BRAND.name}
+                </span>
+                <span className="text-[10px] font-medium tracking-[0.02em] text-faint">
+                  {BRAND.subtitle}
+                </span>
               </span>
             </Link>
-            <nav className="flex items-center gap-1 text-sm">
+
+            <nav aria-label="Main" className="ml-auto flex items-center gap-1">
               {NAV.map((item) => (
                 <Link
                   key={item.href}
                   href={item.href}
-                  className="rounded-md px-3 py-1.5 transition-colors hover:bg-[var(--surface-raised)]"
-                  style={{ color: "var(--text-muted)" }}
+                  className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-surface-2 hover:text-fg"
                 >
                   {item.label}
                 </Link>
               ))}
+              <span aria-hidden className="mx-1 hidden h-4 w-px bg-line sm:block" />
+              <span className="pill pill-strong hidden sm:inline-flex">
+                {BRAND.network}
+              </span>
+              <ThemeToggle />
             </nav>
-            <div
-              className="ml-auto flex items-center gap-2 text-xs"
-              style={{ color: "var(--text-muted)" }}
-            >
-              <span className="rounded border px-2 py-0.5">Arc Mainnet · 5042</span>
-              <span>Independent analytics tool; not affiliated with Circle or Arc.</span>
-            </div>
           </div>
         </header>
 
-        <main className="mx-auto max-w-[1400px] px-4 py-6">{children}</main>
+        <main id="main" className="mx-auto w-full max-w-[1400px] flex-1 px-4 py-5">
+          {children}
+        </main>
 
-        <footer
-          className="mt-10 border-t py-6 text-xs"
-          style={{ borderColor: "var(--border)", color: "var(--text-muted)" }}
-        >
-          <div className="mx-auto max-w-[1400px] px-4 space-y-2">
-            <p className="font-semibold" style={{ color: "var(--text)" }}>
-              ArcPools is a research tool, not investment advice.
-            </p>
-            <p>
-              Historical volume, fees and high APR do not predict future returns. Active
-              liquidity provision carries impermanent loss, token price risk, contract risk and
-              exit risk. APR shown here is a pool-level fee annualization, not a position or wallet
-              return.
+        <footer className="mt-10 border-t border-line">
+          <div className="mx-auto max-w-[1400px] space-y-2 px-4 py-6 text-xs text-muted">
+            <p className="font-semibold text-fg">{BRAND.riskNotice}</p>
+            <p className="max-w-4xl leading-relaxed">
+              Historical volume, fees and high APR do not predict future returns. Active liquidity
+              provision carries impermanent loss, token price risk, contract risk and exit risk. APR
+              shown here is a pool-level fee annualization, not a position or wallet return, and it
+              is not APY.
             </p>
             <p>
               Data sources:{" "}
-              <a className="underline" href="https://www.geckoterminal.com/arc/pools" rel="noreferrer noopener" target="_blank">
+              <a
+                className="text-accent underline-offset-2 hover:underline"
+                href="https://www.geckoterminal.com/arc/pools"
+                rel="noreferrer noopener"
+                target="_blank"
+              >
                 GeckoTerminal
+              </a>
+              {", "}
+              <a
+                className="text-accent underline-offset-2 hover:underline"
+                href="https://dexpaprika.com/arc"
+                rel="noreferrer noopener"
+                target="_blank"
+              >
+                DexPaprika
               </a>{" "}
               and{" "}
-              <a className="underline" href="https://dexpaprika.com/arc" rel="noreferrer noopener" target="_blank">
-                DexPaprika
+              <a
+                className="text-accent underline-offset-2 hover:underline"
+                href="https://dexscreener.com/arc"
+                rel="noreferrer noopener"
+                target="_blank"
+              >
+                DexScreener
               </a>
               . APR values are estimates computed by ArcPools.
             </p>
+            <p className="text-faint">{BRAND.disclaimer}</p>
           </div>
         </footer>
       </body>

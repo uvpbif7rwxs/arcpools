@@ -1,100 +1,419 @@
+/* ==========================================================================
+   ArcPools — visual system (Tailwind v4).
+
+   Dark is the default; `html[data-theme="light"]` overrides the same tokens, so
+   every component is written once and re-themes by flipping one attribute.
+
+   Colours are declared in `@theme` as `rgb(R G B)` so Tailwind's opacity
+   modifiers work on them (`bg-surface/70`, `border-warn/40`). The palette is the
+   one used across the ArcPools brand: a deep navy canvas, a single accent blue
+   for interactive and primary figures, and a small set of semantic hues that
+   each mean one thing and nothing else:
+
+     accent   interactive, primary
+     pos      verified / healthy / positive
+     warn     stale, low confidence, at-risk
+     neg      negative or destroyed value
+     info     neutral provenance and metadata
+     conflict a source disagreement
+
+   A semantic hue is never used decoratively. If a number is not verified,
+   nothing on that row is allowed to be green.
+   ========================================================================== */
+
 @import "tailwindcss";
 
-/*
- * ArcPools visual system.
- * Dark by default (with a light override), dense financial table, one accent
- * hue. Deliberately not a copy of any third-party site's layout or branding.
- */
+/* Theme switching is an explicit attribute, not an OS preference, so `dark:`
+   has to follow the attribute too. */
+@custom-variant light (&:where([data-theme="light"], [data-theme="light"] *));
+
 @theme {
-  --color-ink-950: #06070c;
-  --color-ink-900: #0a0c14;
-  --color-ink-850: #0f121c;
-  --color-ink-800: #151926;
-  --color-ink-700: #1e2433;
-  --color-ink-600: #2b3244;
-  --color-ink-500: #3d465c;
-  --color-mist-400: #6b7794;
-  --color-mist-300: #8d99b5;
-  --color-mist-200: #b9c3d6;
-  --color-mist-100: #e4e9f2;
-  --color-accent-400: #5b8dff;
-  --color-accent-500: #3b6ef5;
-  --color-accent-600: #2b55d4;
-  --color-pos-500: #2fb37a;
-  --color-neg-500: #e0524d;
-  --color-warn-500: #d9a441;
+  /* --- palette: dark (default) --- */
+  --color-canvas: rgb(6 9 17);
+  --color-canvas-grad: rgb(10 16 32);
+  --color-surface: rgb(13 19 34);
+  --color-surface-2: rgb(20 28 46);
+  --color-surface-3: rgb(28 39 64);
+  --color-hover: rgb(24 34 56);
+
+  --color-line: rgb(33 45 71);
+  --color-line-strong: rgb(51 65 95);
+
+  --color-fg: rgb(233 238 251);
+  --color-muted: rgb(154 168 196);
+  --color-faint: rgb(107 122 153);
+
+  --color-accent: rgb(79 140 255);
+  --color-accent-strong: rgb(47 110 240);
+  --color-accent-soft: rgb(22 35 61);
+  --color-accent-fg: rgb(255 255 255);
+
+  --color-pos: rgb(53 211 155);
+  --color-pos-soft: rgb(13 43 35);
+  --color-neg: rgb(248 113 113);
+  --color-neg-soft: rgb(51 21 25);
+  --color-warn: rgb(245 181 68);
+  --color-warn-soft: rgb(51 38 12);
+  --color-info: rgb(76 196 245);
+  --color-info-soft: rgb(11 38 53);
+  --color-conflict: rgb(192 132 252);
+  --color-conflict-soft: rgb(42 26 61);
+
+  --color-ring: rgb(79 140 255);
+
+  /* --- shape --- */
+  --radius-card: 0.75rem;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
 }
 
-:root {
-  color-scheme: dark;
-  --surface: var(--color-ink-900);
-  --surface-raised: var(--color-ink-850);
-  --border: var(--color-ink-700);
-  --text: var(--color-mist-100);
-  --text-muted: var(--color-mist-400);
-}
-
+/* Light theme: the same token names carrying light values. The accent and the
+   semantic hues are darkened rather than swapped, so their meaning survives. */
 html[data-theme="light"] {
-  color-scheme: light;
-  --surface: #ffffff;
-  --surface-raised: #f6f7fa;
-  --border: #e3e7ef;
-  --text: #10131a;
-  --text-muted: #5a6479;
+  --color-canvas: rgb(245 247 252);
+  --color-canvas-grad: rgb(255 255 255);
+  --color-surface: rgb(255 255 255);
+  --color-surface-2: rgb(242 245 251);
+  --color-surface-3: rgb(230 236 247);
+  --color-hover: rgb(238 242 250);
+
+  --color-line: rgb(221 228 240);
+  --color-line-strong: rgb(190 201 221);
+
+  --color-fg: rgb(12 20 36);
+  --color-muted: rgb(77 91 116);
+  --color-faint: rgb(120 133 156);
+
+  --color-accent: rgb(31 95 224);
+  --color-accent-strong: rgb(23 72 179);
+  --color-accent-soft: rgb(228 236 253);
+  --color-accent-fg: rgb(255 255 255);
+
+  --color-pos: rgb(7 121 90);
+  --color-pos-soft: rgb(224 245 236);
+  --color-neg: rgb(179 38 30);
+  --color-neg-soft: rgb(253 234 232);
+  --color-warn: rgb(161 92 7);
+  --color-warn-soft: rgb(253 241 220);
+  --color-info: rgb(11 111 156);
+  --color-info-soft: rgb(226 242 249);
+  --color-conflict: rgb(139 49 199);
+  --color-conflict-soft: rgb(244 232 253);
+
+  --color-ring: rgb(31 95 224);
 }
 
-html,
-body {
-  background: var(--surface);
-  color: var(--text);
+/* ==========================================================================
+   Base
+   ========================================================================== */
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  html[data-theme="light"] {
+    color-scheme: light;
+  }
+
+  html,
+  body {
+    min-height: 100%;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    /* One soft bloom behind the header, so the page has a light source. */
+    background-image: radial-gradient(
+      120% 80% at 50% -10%,
+      color-mix(in oklab, var(--color-accent) 9%, transparent) 0%,
+      transparent 60%
+    );
+    background-repeat: no-repeat;
+    background-attachment: fixed;
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    font-feature-settings: "tnum" 1;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--color-accent) 40%, transparent);
+    color: var(--color-fg);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  /* Slim scrollbars: the pool table is wide and always scrollable. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line-strong) transparent;
+  }
+  *::-webkit-scrollbar {
+    height: 10px;
+    width: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--color-line-strong);
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background-clip: content-box;
+  }
 }
 
-body {
-  font-feature-settings: "tnum" 1, "cv05" 1;
-  -webkit-font-smoothing: antialiased;
+/* ==========================================================================
+   Utilities
+   ========================================================================== */
+@layer utilities {
+  /** Tabular figures for every column-compared number. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+  }
+
+  /** The standard panel: one radius, one border, one raised surface. */
+  .panel {
+    background-color: var(--color-surface);
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-card);
+  }
+
+  /** A panel the reader can act on. */
+  .panel-link {
+    transition: border-color 140ms ease, background-color 140ms ease;
+  }
+  .panel-link:hover {
+    border-color: color-mix(in oklab, var(--color-accent) 55%, var(--color-line));
+  }
+
+  /** Muted background wash for a table header or a nested block. */
+  .wash {
+    background-color: var(--color-surface-2);
+  }
+
+  /** Mono is reserved for identifiers the reader may need to copy or compare. */
+  .ident {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--color-faint);
+  }
 }
 
-/* Tabular figures everywhere numbers are compared column-wise. */
-.tnum {
-  font-variant-numeric: tabular-nums;
+/* ==========================================================================
+   Components
+   ========================================================================== */
+@layer components {
+  /* --- Small pill used for venues, fee tiers and flags ------------------ */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    border: 1px solid var(--color-line);
+    border-radius: 999px;
+    padding: 0.0625rem 0.4375rem;
+    font-size: 0.6875rem;
+    line-height: 1.35;
+    color: var(--color-muted);
+    white-space: nowrap;
+  }
+  .pill-strong {
+    color: var(--color-fg);
+    border-color: var(--color-line-strong);
+  }
+
+  /* --- Provenance badge (verified / estimated / low history) ------------- */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 0.375rem;
+    border: 1px solid;
+    padding: 0.0625rem 0.375rem;
+    font-size: 0.625rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  /* --- Form controls ---------------------------------------------------- */
+  .field {
+    background-color: var(--color-surface-2);
+    border: 1px solid var(--color-line);
+    border-radius: 0.5rem;
+    color: var(--color-fg);
+    padding: 0.375rem 0.625rem;
+    font-size: 0.8125rem;
+    line-height: 1.4;
+  }
+  .field::placeholder {
+    color: var(--color-faint);
+  }
+  .field:hover {
+    border-color: var(--color-line-strong);
+  }
+
+  /* Native select chevron, so the control needs no icon component. */
+  select.field {
+    appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%236b7a99' stroke-width='1.6'><path d='M4 6.5L8 10.5L12 6.5'/></svg>");
+    background-position: right 0.5rem center;
+    background-repeat: no-repeat;
+    background-size: 0.7rem;
+    padding-right: 1.75rem;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    border-radius: 0.5rem;
+    border: 1px solid transparent;
+    padding: 0.375rem 0.75rem;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    transition: background-color 140ms ease, border-color 140ms ease;
+  }
+  .btn-primary {
+    background-color: var(--color-accent-strong);
+    color: var(--color-accent-fg);
+  }
+  .btn-primary:hover {
+    background-color: var(--color-accent);
+  }
+  .btn-ghost {
+    border-color: var(--color-line);
+    color: var(--color-muted);
+  }
+  .btn-ghost:hover {
+    background-color: var(--color-hover);
+    color: var(--color-fg);
+  }
+
+  /* --- Prose blocks (methodology) --------------------------------------- */
+  .prose-ap {
+    color: var(--color-muted);
+    font-size: 0.875rem;
+    line-height: 1.65;
+  }
+  .prose-ap strong {
+    color: var(--color-fg);
+    font-weight: 600;
+  }
+  .prose-ap code {
+    background: var(--color-surface-2);
+    border: 1px solid var(--color-line);
+    border-radius: 0.25rem;
+    padding: 0.05rem 0.3rem;
+    font-family: var(--font-mono);
+    font-size: 0.78em;
+    color: var(--color-fg);
+  }
+  .prose-ap a {
+    color: var(--color-accent);
+    text-underline-offset: 2px;
+  }
+  .prose-ap a:hover {
+    text-decoration: underline;
+  }
+
+  /* --- The pool table --------------------------------------------------- */
+  table.pool-table {
+    border-collapse: separate;
+    border-spacing: 0;
+    width: 100%;
+    min-width: 960px;
+  }
+
+  table.pool-table th,
+  table.pool-table td {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--color-line);
+    white-space: nowrap;
+    text-align: left;
+  }
+
+  table.pool-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--color-surface-2);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-faint);
+  }
+
+  table.pool-table tbody tr {
+    background: var(--color-surface);
+  }
+
+  table.pool-table tbody tr:hover {
+    background: var(--color-hover);
+  }
+
+  /* Sub-rows (the detail panel) belong to the row above them. */
+  table.pool-table tbody tr.sub-row,
+  table.pool-table tbody tr.sub-row:hover {
+    background: var(--color-surface-2);
+  }
+  table.pool-table tbody tr.sub-row > td {
+    border-bottom: 1px solid var(--color-line-strong);
+    white-space: normal;
+  }
+
+  /* The rank column reads as a label, not as data. */
+  table.pool-table td.rank {
+    color: var(--color-faint);
+    font-variant-numeric: tabular-nums;
+    width: 2.5rem;
+  }
+
+  /* --- N/A: never a zero, always explainable ---------------------------- */
+  .na {
+    color: var(--color-faint);
+    font-style: italic;
+    cursor: help;
+    text-decoration: underline dotted
+      color-mix(in oklab, var(--color-faint) 60%, transparent);
+    text-underline-offset: 3px;
+  }
+
+  .scroll-x {
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  /* --- Coverage strip --------------------------------------------------- */
+  .coverage-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem 1rem;
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-card);
+    background: var(--color-surface);
+    padding: 0.5rem 0.75rem;
+    font-size: 0.75rem;
+    color: var(--color-muted);
+  }
 }
 
-table.pool-table {
-  border-collapse: separate;
-  border-spacing: 0;
-  width: 100%;
-  min-width: 1080px;
-}
-
-table.pool-table th,
-table.pool-table td {
-  padding: 0.65rem 0.75rem;
-  border-bottom: 1px solid var(--border);
-  white-space: nowrap;
-}
-
-table.pool-table thead th {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  background: var(--surface-raised);
-  font-size: 0.72rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  font-weight: 600;
-}
-
-table.pool-table tbody tr:hover td {
-  background: color-mix(in srgb, var(--color-accent-500) 6%, transparent);
-}
-
-.scroll-x {
-  overflow-x: auto;
-  scrollbar-width: thin;
-}
-
-.na {
-  color: var(--text-muted);
-  font-style: italic;
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

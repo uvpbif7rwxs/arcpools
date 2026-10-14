@@ -9,6 +9,23 @@
 export const ARC_CHAIN_ID = 5042;
 export const ARC_NETWORK_ID = "arc";
 
+/**
+ * GeckoTerminal prefixes every resource id with its network slug, so token
+ * relationships arrive as "arc_0xabc…". The per-token endpoint
+ * (`/networks/arc/tokens/{address}`) rejects that form with HTTP 404 — verified
+ * live: the bare address returns 200 and the prefixed one returns 404. Storing
+ * the prefixed form silently made 86% of token lookups miss (205 of 237 rows).
+ *
+ * Pool ids are stripped the same way when they are parsed; this helper exists so
+ * the token path cannot drift from it.
+ */
+export function stripNetworkPrefix(id: string): string {
+  const lower = id.toLowerCase();
+  return lower.startsWith(`${ARC_NETWORK_ID}_`)
+    ? lower.slice(ARC_NETWORK_ID.length + 1)
+    : lower.replace(/^arc[-_]/, "");
+}
+
 export type IdentifierKind = "address" | "bytes32";
 
 export type PoolIdentity = {

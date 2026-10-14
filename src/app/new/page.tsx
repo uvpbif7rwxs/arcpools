@@ -1,93 +1,30 @@
-import Link from "next/link";
-import { PoolRowView } from "@/components/pool-row";
-import { getStats, getSyncStatus, queryPools } from "@/server/queries";
-import { formatRelative } from "@/lib/format";
-
-export const dynamic = "force-dynamic";
-
-/**
- * New Pools: sorted by on-chain creation time, newest first.
- * Pools whose creation time is unknown are excluded rather than guessed — a
- * pool discovered today is not a pool created today.
- */
-export default async function NewPoolsPage() {
-  const stats = getStats();
-  const [syncJob] = getSyncStatus();
-  const result = queryPools({
-    sort: "age",
-    order: "desc",
-    page: 1,
-    limit: 50,
-    minLiq: 0,
-    search: null,
-  });
-
-  const rows = result.rows.filter((row) => row.poolCreatedAt !== null);
-
+export default function NewPoolsPage() {
   return (
-    <div className="space-y-4">
-      <section className="space-y-2">
-        <h1 className="text-2xl font-semibold tracking-tight">New Pools</h1>
-        <p className="max-w-3xl text-sm" style={{ color: "var(--text-muted)" }}>
-          Arc pools ordered by on-chain creation time, newest first. Age is measured from the
-          pool&apos;s creation timestamp — not from when ArcPools first saw it. Pools whose
-          creation time no source reports are left out of this list entirely.
-        </p>
-      </section>
-
-      <div
-        className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border px-3 py-2 text-xs"
-        style={{ borderColor: "var(--border)", color: "var(--text-muted)" }}
-      >
-        <span>
-          <span className="tnum">{rows.length}</span> pools with a known creation time
-        </span>
-        <span>
-          Last sync <span className="tnum">{formatRelative(syncJob?.lastSuccessAt ?? null)}</span>
-        </span>
-        <Link href="/" className="ml-auto underline">
-          Back to ranking
-        </Link>
+    <div className="relative min-h-[62vh] overflow-hidden rounded-card border border-line bg-surface">
+      <div aria-hidden className="absolute inset-[-2rem] grid gap-3 p-8 opacity-45 blur-md">
+        <div className="h-16 rounded-xl border border-line bg-surface-2" />
+        {Array.from({ length: 7 }, (_, index) => (
+          <div
+            key={index}
+            className="grid h-14 grid-cols-[1.6fr_1fr_1fr_1fr] gap-4 rounded-lg border border-line bg-surface-2 p-4"
+          >
+            <span className="rounded bg-surface-3" />
+            <span className="rounded bg-surface-3" />
+            <span className="rounded bg-surface-3" />
+            <span className="rounded bg-surface-3" />
+          </div>
+        ))}
       </div>
-
-      {rows.length === 0 ? (
-        <div
-          className="rounded-lg border p-10 text-center text-sm"
-          style={{ borderColor: "var(--border)", color: "var(--text-muted)" }}
-        >
-          No pool creation times are available yet.
-        </div>
-      ) : (
-        <div className="scroll-x rounded-lg border" style={{ borderColor: "var(--border)" }}>
-          <table className="pool-table">
-            <thead>
-              <tr>
-                <th className="w-12">#</th>
-                <th>Pool</th>
-                <th className="text-right">MCAP</th>
-                <th className="text-right">AGE</th>
-                <th className="text-right">Est. Fee APR</th>
-                <th className="text-right">LIQ</th>
-                <th className="text-right">VOL 24H</th>
-                <th className="text-right">HOLDERS</th>
-                <th>Flags</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, index) => (
-                <PoolRowView key={row.poolKey} row={row} rank={index + 1} />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-        Low-liquidity, high-volume pools on Arc frequently turn out to be wash-traded. Check the
-        flags on each row and treat a sub-$10K pool&apos;s APR as noise.
-        {" "}
-        <span className="tnum">{stats.trackedPools}</span> pools are tracked in total.
-      </p>
+      <div className="absolute inset-0 bg-canvas/55 backdrop-blur-sm" />
+      <div className="relative flex min-h-[62vh] flex-col items-center justify-center px-6 text-center">
+        <span className="pill pill-strong">New Pools</span>
+        <h1 className="mt-4 text-3xl font-bold tracking-tight text-fg sm:text-4xl">
+          Coming Soon
+        </h1>
+        <p className="mt-3 max-w-md text-sm leading-relaxed text-muted">
+          A focused view for newly created Arc liquidity pools is being prepared.
+        </p>
+      </div>
     </div>
   );
 }

@@ -64,12 +64,12 @@ function classify(identifier: string): { identifier: string; kind: IdentifierKin
 }
 
 /**
- * DexPaprika reports the zero address (and sometimes the 0xEeee… sentinel) for
- * the native side of a pool, which would render as "0x0000…0000 / USDC".
- * Treating those as "token not identified" keeps the pool (it carries real
- * liquidity) without inventing a token identity.
+ * Arc represents its native gas token with the zero address, so a zero-address
+ * side of a pool is a real token (verified: DexPaprika resolves it to `USDC`),
+ * not a missing one. It must keep its address so enrichment can name it, and so
+ * the tokens join still works.
  */
-function isPlaceholderToken(address: string | undefined | null): boolean {
+function isNativeSentinel(address: string | undefined | null): boolean {
   if (!address) return true;
   const a = address.toLowerCase();
   return /^0x0{40}$/.test(a) || /^0xe{40}$/.test(a);
@@ -83,6 +83,9 @@ function toPool(pool: DpPool, fetchedAt: string): DiscoveredPool | null {
   const quote = tokens[1];
   const dexId = canonicalDexId(pool.dex_id ?? "unknown");
 
+  const baseAddress = base?.id?.toLowerCase() ?? pool.base_token_id?.toLowerCase() ?? null;
+  const quoteAddress = quote?.id?.toLowerCase() ?? pool.quote_token_id?.toLowerCase() ?? null;
+
   return {
     chainId: ARC_CHAIN_ID,
     dexId,
@@ -90,14 +93,12 @@ function toPool(pool: DpPool, fetchedAt: string): DiscoveredPool | null {
     dexVersion: dexId.includes("v4") ? "v4" : dexId.includes("v3") ? "v3" : dexId.includes("v2") ? "v2" : "unknown",
     poolIdentifier: identifier,
     identifierKind: kind,
-    baseSymbol: isPlaceholderToken(base?.id) ? null : (base?.symbol ?? null),
-    baseTokenAddress: isPlaceholderToken(base?.id)
-      ? null
-      : (base?.id?.toLowerCase() ?? pool.base_token_id?.toLowerCase() ?? null),
-    quoteSymbol: isPlaceholderToken(quote?.id) ? null : (quote?.symbol ?? null),
-    quoteTokenAddress: isPlaceholderToken(quote?.id)
-      ? null
-      : (quote?.id?.toLowerCase() ?? pool.quote_token_id?.toLowerCase() ?? null),
+    // The symbol is unknown until enrichment runs, but the address is kept even
+    // when it is the native sentinel, because it is resolvable.
+    baseSymbol: base?.symbol ?? null,
+    baseTokenAddress: isNativeSentinel(baseAddress) ? baseAddress : baseAddress,
+    quoteSymbol: quote?.symbol ?? null,
+    quoteTokenAddress: isNativeSentinel(quoteAddress) ? quoteAddress : quoteAddress,
     feeTierLabel: toNumber(pool.fee) !== null ? `${pool.fee}%` : null,
     poolCreatedAt: pool.created_at ?? null,
     liquidityUsd: positive(pool.liquidity_usd),
@@ -114,6 +115,56 @@ function toPool(pool: DpPool, fetchedAt: string): DiscoveredPool | null {
     updatedAt: fetchedAt,
   };
 }
+
+/**
+ * Token metadata for pools discovered through DexPaprika.
+ *
+ * The search endpoint returns token ids only, which is why pools it discovered
+ * alone used to render as raw addresses. DexPaprika's own token endpoint fills
+ * the gap — and unlike the GeckoTerminal equivalent it counts against a
+ * separate quota, so spreading the lookups across both upstreams is what keeps
+ * enrichment from stalling when one of them is rate-limited.
+ *
+ * Verified against Arc mainnet: it resolves the zero-address sentinel to
+ * `USDC`, which is Arc's native gas token. Treating that address as "unknown"
+ * (an earlier assumption) was simply wrong.
+ */
+export async function fetchToken(
+  address: string,
+): Promise<{
+  address: string;
+  name: string | null;
+  symbol: string | null;
+  decimals: number | null;
+  priceUsd: number | null;
+  fdvUsd: number | null;
+} | null> {
+  const { data } = await fetchJson<DpTokenResponse>(
+    `${BASE}/networks/arc/tokens/${address}`,
+    { minIntervalMs: MIN_INTERVAL_MS, retries: 2, headers: header() },
+  );
+  if (data.error || !data.id) return null;
+  const summary = (data.summary ?? {}) as Record<string, unknown>;
+  return {
+    address,
+    name: data.name ?? null,
+    symbol: data.symbol ?? null,
+    decimals: typeof data.decimals === "number" ? data.decimals : null,
+    priceUsd: positive(data.price_usd) ?? positive(summary.price_usd),
+    fdvUsd: positive(summary.fdv),
+  };
+}
+
+type DpTokenResponse = {
+  id?: string;
+  error?: string;
+  message?: string;
+  name?: string;
+  symbol?: string;
+  decimals?: number;
+  price_usd?: number | null;
+  summary?: Record<string, unknown>;
+};
 
 /**
  * Best-effort discovery pass. Any failure returns an empty list rather than

@@ -16,7 +16,10 @@ import {
   fetchTokenMetadata,
   GT_MAX_PAGE,
 } from "./sources/geckoterminal";
-import { discoverPools } from "./sources/dexpaprika";
+import { discoverPools, fetchToken } from "./sources/dexpaprika";
+import { fetchDexScreenerMetrics } from "./sources/dexscreener";
+import { fetchCmcHolderCount, fetchCmcMarketCap } from "./sources/coinmarketcap";
+import { fetchTokenSymbol } from "./sources/arc-rpc";
 import { poolKeyOf, type DiscoveredPool, type PoolFlag } from "./types";
 
 export type SyncOptions = {
@@ -29,6 +32,10 @@ export type SyncOptions = {
   tokenBudget?: number;
   /** Page cap for the DexPaprika cross-check pass. */
   crossCheck?: boolean;
+  /** Number of base tokens enriched through CMC's keyless public DEX API. */
+  cmcTokenBudget?: number;
+  /** On-chain symbol lookups after both indexer sources miss. */
+  rpcTokenBudget?: number;
   now?: Date;
 };
 
@@ -39,8 +46,14 @@ export type SyncResult = {
   pagesFetched: number;
   startPage: number;
   detailCalls: number;
-  tokenCalls: number;
+  gtTokenCalls: number;
+  dpTokenCalls: number;
+  rpcTokenCalls: number;
+  tokensUnresolved: number;
   crossCheck: { pools: number; error: string | null; truncated: boolean };
+  dexScreener: DexScreenerRefreshResult;
+  missingVolume: MissingVolumeRefreshResult;
+  coinMarketCap: CoinMarketCapRefreshResult;
   warnings: string[];
   startedAt: string;
   finishedAt: string;
@@ -58,6 +71,8 @@ const DEFAULTS = {
   detailBudget: Number(process.env.SYNC_DETAIL_BUDGET ?? 30),
   tokenBudget: Number(process.env.SYNC_TOKEN_BUDGET ?? 40),
   crossCheck: process.env.SYNC_CROSS_CHECK !== "false",
+  cmcTokenBudget: Number(process.env.SYNC_CMC_TOKEN_BUDGET ?? 20),
+  rpcTokenBudget: Number(process.env.SYNC_RPC_TOKEN_BUDGET ?? 40),
 };
 
 /**
@@ -71,6 +86,10 @@ export function rotatingStartPage(maxPages: number, now: Date, windowMs = 10 * 6
   return (Math.floor(now.getTime() / windowMs) % maxPages) + 1;
 }
 
+export function syncStartPage(now: Date): number {
+  return rotatingStartPage(GT_MAX_PAGE, now);
+}
+
 /**
  * How old a pool's own data may get before the row is shown as stale. Comfortably
  * longer than the rotation cycle so a pool is not flagged between its own visits.
@@ -79,6 +98,201 @@ const STALE_AFTER_MS = Number(process.env.SYNC_STALE_AFTER_MS ?? 60 * 60_000);
 
 /** Relative disagreement above which two sources are considered to conflict. */
 const LIQ_CONFLICT_THRESHOLD = 0.25;
+
+export type DexScreenerRefreshResult = {
+  requests: number;
+  matched: number;
+  updated: number;
+  filledLiquidity: number;
+  filledVolume24h: number;
+  marketCapsUpdated: number;
+  identitiesUpdated: number;
+  refreshedStale: number;
+  errors: string[];
+};
+
+export type MissingVolumeRefreshResult = {
+  attempted: number;
+  updated: number;
+  errors: string[];
+};
+
+export type CoinMarketCapRefreshResult = {
+  attempted: number;
+  marketCapsUpdated: number;
+  holdersUpdated: number;
+  errors: string[];
+};
+
+const CMC_REFRESH_MS = 24 * 60 * 60_000;
+const FEE_RECHECK_MS = 24 * 60 * 60_000;
+
+/**
+ * Fill token MCAP and holder counts from CMC's documented keyless DEX API.
+ * Missing values are prioritized by pool liquidity and refreshed gradually so
+ * the shared public rate pool is not hammered by a full token crawl.
+ */
+export async function refreshKnownTokensFromCoinMarketCap(
+  now = new Date(),
+  budget = DEFAULTS.cmcTokenBudget,
+): Promise<CoinMarketCapRefreshResult> {
+  const db = getDb();
+  const staleBefore = new Date(now.getTime() - CMC_REFRESH_MS).toISOString();
+  const candidates = db
+    .prepare(
+      `SELECT p.base_token_address AS address,
+              t.market_cap_usd AS marketCapUsd,
+              t.market_cap_checked_at AS marketCapCheckedAt,
+              t.fdv_usd AS fdvUsd,
+              t.holders_count AS holdersCount,
+              t.holders_updated_at AS holdersUpdatedAt,
+              t.holders_checked_at AS holdersCheckedAt,
+              EXISTS(
+                SELECT 1 FROM pools fp
+                JOIN pool_flags ff ON ff.pool_key = fp.pool_key
+                WHERE fp.chain_id = p.chain_id
+                  AND fp.base_token_address = p.base_token_address
+                  AND ff.flag = 'mcap_estimated_cmc'
+              ) AS marketCapFromCmc,
+              MAX(m.liquidity_usd) AS maxLiquidity
+       FROM pools p
+       JOIN pool_metrics m ON m.pool_key = p.pool_key
+       JOIN tokens t ON t.chain_id = p.chain_id AND t.address = p.base_token_address
+       WHERE p.chain_id = 5042
+         AND p.base_token_address GLOB '0x[0-9a-fA-F]*'
+         AND length(p.base_token_address) = 42
+         AND p.base_token_address NOT LIKE '0x0000%'
+       GROUP BY p.base_token_address
+       ORDER BY maxLiquidity DESC,
+                (t.holders_count IS NULL) DESC,
+                (t.market_cap_usd IS NULL) DESC`,
+    )
+    .all() as {
+    address: string;
+    marketCapUsd: number | null;
+    marketCapCheckedAt: string | null;
+    fdvUsd: number | null;
+    holdersCount: number | null;
+    holdersUpdatedAt: string | null;
+    holdersCheckedAt: string | null;
+    marketCapFromCmc: number;
+    maxLiquidity: number | null;
+  }[];
+  const tokens = candidates
+    .filter((token) => {
+      const marketCapLastChecked = token.marketCapCheckedAt ?? token.holdersUpdatedAt;
+      const holdersLastChecked = token.holdersCheckedAt ?? token.holdersUpdatedAt;
+      const marketCapDue =
+        (token.marketCapUsd === null || token.marketCapFromCmc === 1) &&
+        (marketCapLastChecked === null || marketCapLastChecked < staleBefore);
+      const holdersDue = holdersLastChecked === null || holdersLastChecked < staleBefore;
+      return marketCapDue || holdersDue;
+    })
+    .slice(0, Math.max(0, budget));
+
+  const result: CoinMarketCapRefreshResult = {
+    attempted: 0,
+    marketCapsUpdated: 0,
+    holdersUpdated: 0,
+    errors: [],
+  };
+  const updateToken = db.prepare(`
+    UPDATE tokens SET
+      market_cap_usd = COALESCE(@marketCapUsd, market_cap_usd),
+      market_cap_checked_at = COALESCE(@marketCapCheckedAt, market_cap_checked_at),
+      holders_count = COALESCE(@holdersCount, holders_count),
+      holders_updated_at = CASE
+        WHEN @holdersCount IS NOT NULL THEN @holdersUpdatedAt
+        ELSE holders_updated_at
+      END,
+      holders_checked_at = COALESCE(@holdersCheckedAt, holders_checked_at)
+    WHERE chain_id = 5042 AND address = @address
+  `);
+  const poolsForToken = db.prepare(
+    "SELECT pool_key AS poolKey FROM pools WHERE chain_id = 5042 AND base_token_address = ?",
+  );
+  const insertFlag = db.prepare(
+    "INSERT OR REPLACE INTO pool_flags (pool_key, flag, detail) VALUES (?, ?, ?)",
+  );
+
+  for (const token of tokens) {
+    result.attempted++;
+    let marketCapUsd: number | null = null;
+    let marketCapCheckedAt: string | null = null;
+    let holdersCount: number | null = null;
+    let holdersUpdatedAt: string | null = null;
+    let holdersCheckedAt: string | null = null;
+    let rateLimited = false;
+    const marketCapLastChecked = token.marketCapCheckedAt ?? token.holdersUpdatedAt;
+    const holdersLastChecked = token.holdersCheckedAt ?? token.holdersUpdatedAt;
+    const marketCapDue =
+      (token.marketCapUsd === null || token.marketCapFromCmc === 1) &&
+      (marketCapLastChecked === null || marketCapLastChecked < staleBefore);
+    const holdersDue = holdersLastChecked === null || holdersLastChecked < staleBefore;
+
+    if (marketCapDue) {
+      try {
+        const response = await fetchCmcMarketCap(token.address);
+        const reported = response.marketCapUsd;
+        marketCapUsd = sanitizeValuation(reported, token.fdvUsd).marketCapUsd;
+        marketCapCheckedAt = response.fetchedAt;
+      } catch (error) {
+        result.errors.push(
+          `${token.address} MCAP: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        rateLimited = String(error).includes("429");
+      }
+    }
+    if (holdersDue && !rateLimited) {
+      try {
+        const holders = await fetchCmcHolderCount(token.address);
+        holdersCount = holders.holdersCount;
+        holdersCheckedAt = holders.fetchedAt;
+        holdersUpdatedAt = holdersCount === null ? null : holders.fetchedAt;
+      } catch (error) {
+        result.errors.push(
+          `${token.address} holders: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        rateLimited = String(error).includes("429");
+      }
+    }
+
+    if (marketCapCheckedAt !== null || holdersCheckedAt !== null) {
+      updateToken.run({
+        address: token.address,
+        marketCapUsd,
+        marketCapCheckedAt,
+        holdersCount,
+        holdersUpdatedAt,
+        holdersCheckedAt,
+      });
+    }
+    if (marketCapUsd !== null) result.marketCapsUpdated++;
+    if (holdersCount !== null) result.holdersUpdated++;
+
+    const poolRows = poolsForToken.all(token.address) as { poolKey: string }[];
+    for (const pool of poolRows) {
+      if (marketCapUsd !== null) {
+        insertFlag.run(
+          pool.poolKey,
+          "mcap_estimated_cmc",
+          "CoinMarketCap's DEX token endpoint reports this market cap. Arc circulating supply is not independently verified, so treat it as an estimate.",
+        );
+      }
+      if (holdersCount !== null) {
+        insertFlag.run(
+          pool.poolKey,
+          "holders_cmc",
+          "Base-token holder count from CoinMarketCap's keyless public DEX endpoint.",
+        );
+      }
+    }
+    // A shared keyless 429 should end this pass; a later sync resumes at the
+    // first unchecked token without losing a successful partial update.
+    if (rateLimited) break;
+  }
+  return result;
+}
 
 function recordJob(
   job: string,
@@ -184,14 +398,444 @@ function detectFlags(pool: DiscoveredPool): PoolFlag[] {
   return flags;
 }
 
+/**
+ * Refresh known pools through DexScreener without changing discovery or source
+ * precedence. Fresh primary metrics are never overwritten: DexScreener only
+ * fills a missing field or replaces a row that has already aged into `stale`.
+ */
+export async function refreshKnownPoolsFromDexScreener(
+  now = new Date(),
+): Promise<DexScreenerRefreshResult> {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT p.pool_key AS poolKey, p.pool_identifier AS poolIdentifier,
+              p.base_symbol AS baseSymbol, p.quote_symbol AS quoteSymbol,
+              p.base_token_address AS baseTokenAddress,
+              p.quote_token_address AS quoteTokenAddress,
+              p.pool_created_at AS poolCreatedAt,
+              m.liquidity_usd AS liquidityUsd, m.volume_24h_usd AS volume24hUsd,
+              m.price_usd AS priceUsd, m.price_change_24h AS priceChange24h,
+              m.fee_rate AS feeRate, m.fee_source AS feeSource,
+              m.source, m.updated_at AS updatedAt, m.stale,
+              t.market_cap_usd AS marketCapUsd, t.fdv_usd AS fdvUsd,
+              EXISTS(
+                SELECT 1 FROM pool_flags pf
+                WHERE pf.pool_key = p.pool_key AND pf.flag = 'mcap_estimated_dexscreener'
+              ) AS marketCapFromDexScreener
+       FROM pools p
+       JOIN pool_metrics m ON m.pool_key = p.pool_key
+       LEFT JOIN tokens t ON t.chain_id = p.chain_id AND t.address = p.base_token_address`,
+    )
+    .all() as {
+    poolKey: string;
+    poolIdentifier: string;
+    baseSymbol: string | null;
+    quoteSymbol: string | null;
+    baseTokenAddress: string | null;
+    quoteTokenAddress: string | null;
+    poolCreatedAt: string | null;
+    liquidityUsd: number | null;
+    volume24hUsd: number | null;
+    priceUsd: number | null;
+    priceChange24h: number | null;
+    feeRate: number | null;
+    feeSource: string | null;
+    source: string;
+    updatedAt: string;
+    stale: number;
+    marketCapUsd: number | null;
+    fdvUsd: number | null;
+    marketCapFromDexScreener: number;
+  }[];
+
+  const fetched = await fetchDexScreenerMetrics(rows.map((row) => row.poolIdentifier));
+  const result: DexScreenerRefreshResult = {
+    requests: fetched.requests,
+    matched: fetched.metrics.size,
+    updated: 0,
+    filledLiquidity: 0,
+    filledVolume24h: 0,
+    marketCapsUpdated: 0,
+    identitiesUpdated: 0,
+    refreshedStale: 0,
+    errors: fetched.errors,
+  };
+  const staleCutoff = now.getTime() - STALE_AFTER_MS;
+
+  const updatePoolCreatedAt = db.prepare(
+    `UPDATE pools SET pool_created_at = ? WHERE pool_key = ? AND pool_created_at IS NULL`,
+  );
+  const updatePoolIdentity = db.prepare(`
+    UPDATE pools SET
+      base_symbol = @baseSymbol,
+      base_token_address = @baseTokenAddress,
+      quote_symbol = @quoteSymbol,
+      quote_token_address = @quoteTokenAddress
+    WHERE pool_key = @poolKey
+  `);
+  const upsertTokenIdentity = db.prepare(`
+    INSERT INTO tokens (chain_id, address, name, symbol)
+    VALUES (5042, @address, @name, @symbol)
+    ON CONFLICT(chain_id, address) DO UPDATE SET
+      name = COALESCE(excluded.name, tokens.name),
+      symbol = COALESCE(excluded.symbol, tokens.symbol)
+  `);
+  const updateMetrics = db.prepare(`
+    UPDATE pool_metrics SET
+      liquidity_usd = @liquidityUsd,
+      volume_24h_usd = @volume24hUsd,
+      price_usd = @priceUsd,
+      price_change_24h = @priceChange24h,
+      apr_24h = @apr24h,
+      apr_method = @aprMethod,
+      apr_confidence = @aprConfidence,
+      apr_reason = @aprReason,
+      source = @source,
+      updated_at = @updatedAt,
+      stale = 0
+    WHERE pool_key = @poolKey
+  `);
+  const insertSnapshot = db.prepare(`
+    INSERT OR REPLACE INTO pool_snapshots
+      (pool_key, captured_at, liquidity_usd, volume_24h_usd, est_apr_24h)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+  const insertFlag = db.prepare(
+    `INSERT OR REPLACE INTO pool_flags (pool_key, flag, detail) VALUES (?, ?, ?)`,
+  );
+  const updateTokenValuation = db.prepare(`
+    UPDATE tokens SET
+      market_cap_usd = @marketCapUsd,
+      market_cap_checked_at = @checkedAt,
+      fdv_usd = COALESCE(@fdvUsd, fdv_usd)
+    WHERE chain_id = 5042 AND address = @address
+  `);
+  const poolsForToken = db.prepare(
+    "SELECT pool_key AS poolKey FROM pools WHERE chain_id = 5042 AND base_token_address = ?",
+  );
+  const clearCarried = db.prepare(
+    `DELETE FROM pool_flags WHERE pool_key = ? AND flag = 'metric_carried'`,
+  );
+  const clearIdentityFlags = db.prepare(
+    `DELETE FROM pool_flags WHERE pool_key = ? AND flag IN ('symbol_pending', 'token_unidentified')`,
+  );
+
+  const valuedTokens = new Set<string>();
+  const write = db.transaction(() => {
+    for (const row of rows) {
+      const incoming = fetched.metrics.get(row.poolIdentifier.toLowerCase());
+      if (!incoming) continue;
+
+      const hasIdentity =
+        incoming.baseTokenAddress &&
+        incoming.baseTokenSymbol &&
+        incoming.quoteTokenAddress &&
+        incoming.quoteTokenSymbol;
+      const identityChanged =
+        hasIdentity &&
+        (row.baseSymbol !== incoming.baseTokenSymbol ||
+          row.quoteSymbol !== incoming.quoteTokenSymbol ||
+          row.baseTokenAddress?.toLowerCase() !== incoming.baseTokenAddress ||
+          row.quoteTokenAddress?.toLowerCase() !== incoming.quoteTokenAddress);
+      if (identityChanged) {
+        updatePoolIdentity.run({
+          poolKey: row.poolKey,
+          baseSymbol: incoming.baseTokenSymbol,
+          baseTokenAddress: incoming.baseTokenAddress,
+          quoteSymbol: incoming.quoteTokenSymbol,
+          quoteTokenAddress: incoming.quoteTokenAddress,
+        });
+        upsertTokenIdentity.run({
+          address: incoming.baseTokenAddress,
+          name: incoming.baseTokenName,
+          symbol: incoming.baseTokenSymbol,
+        });
+        upsertTokenIdentity.run({
+          address: incoming.quoteTokenAddress,
+          name: incoming.quoteTokenName,
+          symbol: incoming.quoteTokenSymbol,
+        });
+        clearIdentityFlags.run(row.poolKey);
+        result.identitiesUpdated++;
+      }
+
+      if (!row.poolCreatedAt && incoming.poolCreatedAt) {
+        updatePoolCreatedAt.run(incoming.poolCreatedAt, row.poolKey);
+      }
+
+      const baseTokenAddress = hasIdentity
+        ? incoming.baseTokenAddress
+        : row.baseTokenAddress?.toLowerCase() ?? null;
+      if (
+        baseTokenAddress &&
+        baseTokenAddress === incoming.baseTokenAddress &&
+        !valuedTokens.has(baseTokenAddress) &&
+        (row.marketCapUsd === null || row.marketCapFromDexScreener === 1)
+      ) {
+        valuedTokens.add(baseTokenAddress);
+        const valuation = sanitizeValuation(
+          incoming.marketCapUsd,
+          incoming.fdvUsd ?? row.fdvUsd,
+        );
+        if (valuation.marketCapUsd !== null) {
+          updateTokenValuation.run({
+            address: baseTokenAddress,
+            marketCapUsd: valuation.marketCapUsd,
+            fdvUsd: valuation.fdvUsd,
+            checkedAt: incoming.updatedAt,
+          });
+          result.marketCapsUpdated++;
+          const tokenPools = poolsForToken.all(baseTokenAddress) as { poolKey: string }[];
+          for (const pool of tokenPools) {
+            insertFlag.run(
+              pool.poolKey,
+              "mcap_estimated_dexscreener",
+              "DexScreener reports this market cap, but Arc circulating supply is not independently verified, so treat it as an estimate.",
+            );
+          }
+        }
+      }
+
+      const aged = Date.parse(row.updatedAt) < staleCutoff;
+      const isStale = row.stale === 1 || aged;
+      const hasCompleteMarketMetrics =
+        incoming.liquidityUsd !== null && incoming.volume24hUsd !== null;
+
+      if (!isStale && row.liquidityUsd && incoming.liquidityUsd) {
+        const drift =
+          Math.abs(row.liquidityUsd - incoming.liquidityUsd) /
+          Math.max(row.liquidityUsd, incoming.liquidityUsd);
+        if (drift > LIQ_CONFLICT_THRESHOLD) {
+          insertFlag.run(
+            row.poolKey,
+            "source_conflict",
+            "Fresh primary liquidity and DexScreener differ by more than 25%; the primary value is kept.",
+          );
+        }
+      }
+
+      const nextLiquidity = isStale
+        ? (incoming.liquidityUsd ?? row.liquidityUsd)
+        : (row.liquidityUsd ?? incoming.liquidityUsd);
+      const nextVolume24h = isStale
+        ? (incoming.volume24hUsd ?? row.volume24hUsd)
+        : (row.volume24hUsd ?? incoming.volume24hUsd);
+      const nextPrice = isStale
+        ? (incoming.priceUsd ?? row.priceUsd)
+        : (row.priceUsd ?? incoming.priceUsd);
+      const nextPriceChange = isStale
+        ? (incoming.priceChange24h ?? row.priceChange24h)
+        : (row.priceChange24h ?? incoming.priceChange24h);
+
+      const filledLiquidity = row.liquidityUsd === null && incoming.liquidityUsd !== null;
+      const filledVolume = row.volume24hUsd === null && incoming.volume24hUsd !== null;
+      const filledPrice = row.priceUsd === null && incoming.priceUsd !== null;
+      // `stale` is row-level, so clearing it is only honest when both core
+      // market fields were refreshed together. A fresh row may still accept a
+      // single missing field without changing the already-current values.
+      const applied = isStale
+        ? hasCompleteMarketMetrics
+        : filledLiquidity || filledVolume || filledPrice;
+      if (!applied) continue;
+
+      const apr = computeApr24h({
+        volume24hUsd: nextVolume24h,
+        liquidityUsd: nextLiquidity,
+        feeRate: row.feeRate,
+        feeSource:
+          row.feeSource === "detail_api" || row.feeSource === "pool_name"
+            ? row.feeSource
+            : "unknown",
+        poolCreatedAt: row.poolCreatedAt ?? incoming.poolCreatedAt,
+        now,
+      });
+      const source = row.source.includes("dexscreener")
+        ? row.source
+        : `${row.source}+dexscreener`;
+
+      updateMetrics.run({
+        poolKey: row.poolKey,
+        liquidityUsd: nextLiquidity,
+        volume24hUsd: nextVolume24h,
+        priceUsd: nextPrice,
+        priceChange24h: nextPriceChange,
+        apr24h: apr.apr24h,
+        aprMethod: apr.method,
+        aprConfidence: apr.confidence,
+        aprReason: apr.reason,
+        source,
+        updatedAt: incoming.updatedAt,
+      });
+      insertSnapshot.run(
+        row.poolKey,
+        incoming.updatedAt,
+        nextLiquidity,
+        nextVolume24h,
+        apr.apr24h,
+      );
+      clearCarried.run(row.poolKey);
+      insertFlag.run(
+        row.poolKey,
+        "dexscreener_fallback",
+        isStale
+          ? "Primary metrics were stale, so current liquidity and 24h volume were refreshed from DexScreener."
+          : "A missing primary metric was filled from DexScreener; fresh primary values were kept.",
+      );
+
+      result.updated++;
+      if (filledLiquidity) result.filledLiquidity++;
+      if (filledVolume) result.filledVolume24h++;
+      if (isStale) result.refreshedStale++;
+    }
+  });
+  write();
+  return result;
+}
+
+/**
+ * Recover the small set of known address pools whose 24h volume is still
+ * missing after the bulk sources. The GeckoTerminal detail endpoint is slower,
+ * so this path is deliberately capped and only spends calls on actual gaps.
+ */
+export async function refreshMissingVolumesFromGeckoTerminal(
+  now = new Date(),
+  budget = Number(process.env.MISSING_VOLUME_DETAIL_BUDGET ?? 5),
+): Promise<MissingVolumeRefreshResult> {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT p.pool_key AS poolKey, p.pool_identifier AS poolIdentifier,
+              p.pool_created_at AS poolCreatedAt,
+              m.liquidity_usd AS liquidityUsd, m.fee_rate AS feeRate,
+              m.fee_source AS feeSource, m.source, m.stale
+       FROM pools p JOIN pool_metrics m ON m.pool_key = p.pool_key
+       WHERE m.volume_24h_usd IS NULL AND p.identifier_kind = 'address'
+       ORDER BY m.liquidity_usd DESC
+       LIMIT ?`,
+    )
+    .all(Math.max(0, budget)) as {
+    poolKey: string;
+    poolIdentifier: string;
+    poolCreatedAt: string | null;
+    liquidityUsd: number | null;
+    feeRate: number | null;
+    feeSource: string | null;
+    source: string;
+    stale: number;
+  }[];
+
+  const result: MissingVolumeRefreshResult = { attempted: 0, updated: 0, errors: [] };
+  const updatePoolCreatedAt = db.prepare(
+    `UPDATE pools SET pool_created_at = ? WHERE pool_key = ? AND pool_created_at IS NULL`,
+  );
+  const updateMetrics = db.prepare(`
+    UPDATE pool_metrics SET
+      liquidity_usd = @liquidityUsd,
+      volume_24h_usd = @volume24hUsd,
+      fee_rate = @feeRate,
+      fee_source = @feeSource,
+      apr_24h = @apr24h,
+      apr_method = @aprMethod,
+      apr_confidence = @aprConfidence,
+      apr_reason = @aprReason,
+      source = @source,
+      updated_at = @updatedAt,
+      stale = @stale
+    WHERE pool_key = @poolKey
+  `);
+  const insertSnapshot = db.prepare(`
+    INSERT OR REPLACE INTO pool_snapshots
+      (pool_key, captured_at, liquidity_usd, volume_24h_usd, est_apr_24h)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+  const insertFlag = db.prepare(
+    `INSERT OR REPLACE INTO pool_flags (pool_key, flag, detail) VALUES (?, ?, ?)`,
+  );
+  const clearCarried = db.prepare(
+    `DELETE FROM pool_flags WHERE pool_key = ? AND flag = 'metric_carried'`,
+  );
+
+  for (const row of rows) {
+    result.attempted++;
+    try {
+      const detail = await fetchPoolDetail(row.poolIdentifier);
+      if (!detail?.volume24hUsd) continue;
+
+      const liquidityUsd = row.liquidityUsd ?? detail.liquidityUsd;
+      const feeRate = detail.feeRate ?? row.feeRate;
+      const feeSource = detail.feeRate
+        ? "detail_api"
+        : row.feeSource === "detail_api" || row.feeSource === "pool_name"
+          ? row.feeSource
+          : "unknown";
+      const poolCreatedAt = row.poolCreatedAt ?? detail.poolCreatedAt;
+      const apr = computeApr24h({
+        volume24hUsd: detail.volume24hUsd,
+        liquidityUsd,
+        feeRate,
+        feeSource,
+        poolCreatedAt,
+        now,
+      });
+      const source = row.source.includes("geckoterminal_detail")
+        ? row.source
+        : `${row.source}+geckoterminal_detail`;
+
+      db.transaction(() => {
+        if (!row.poolCreatedAt && detail.poolCreatedAt) {
+          updatePoolCreatedAt.run(detail.poolCreatedAt, row.poolKey);
+        }
+        updateMetrics.run({
+          poolKey: row.poolKey,
+          liquidityUsd,
+          volume24hUsd: detail.volume24hUsd,
+          feeRate,
+          feeSource,
+          apr24h: apr.apr24h,
+          aprMethod: apr.method,
+          aprConfidence: apr.confidence,
+          aprReason: apr.reason,
+          source,
+          updatedAt: detail.updatedAt,
+          stale: liquidityUsd === null ? row.stale : 0,
+        });
+        insertSnapshot.run(
+          row.poolKey,
+          detail.updatedAt,
+          liquidityUsd,
+          detail.volume24hUsd,
+          apr.apr24h,
+        );
+        clearCarried.run(row.poolKey);
+        insertFlag.run(
+          row.poolKey,
+          "geckoterminal_detail_fallback",
+          "Missing 24h volume was recovered from the GeckoTerminal pool detail endpoint.",
+        );
+      })();
+      result.updated++;
+    } catch (error) {
+      result.errors.push(error instanceof Error ? error.message : String(error));
+      break;
+    }
+  }
+
+  return result;
+}
+
 export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
   const maxPages = Math.min(options.maxPages ?? DEFAULTS.maxPages, GT_MAX_PAGE);
   const detailBudget = options.detailBudget ?? DEFAULTS.detailBudget;
   const tokenBudget = options.tokenBudget ?? DEFAULTS.tokenBudget;
+  const rpcTokenBudget = options.rpcTokenBudget ?? DEFAULTS.rpcTokenBudget;
   const now = options.now ?? new Date();
   // Rotating start page keeps each run inside GeckoTerminal's keyless quota:
   // a full 10-page crawl on every tick exceeds it and ends in a hard 429.
-  const startPage = options.startPage ?? rotatingStartPage(maxPages, now);
+  // `maxPages` is the number of pages fetched per run, not the size of the
+  // rotation. The upstream exposes ten pages, so a three-page budget must
+  // still move across all ten instead of repeating pages 1–3 forever.
+  const startPage = options.startPage ?? syncStartPage(now);
   const startedAt = now.toISOString();
   const warnings: string[] = [];
   /** Pool keys where two sources disagree on liquidity beyond the threshold. */
@@ -219,9 +863,9 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
         const existing = merged.get(key);
         merged.set(key, mergePool(existing, pool));
       }
-      cursor = cursor >= maxPages ? 1 : cursor + 1;
+      cursor = cursor >= GT_MAX_PAGE ? 1 : cursor + 1;
       // A short page is the real end of the list; nothing beyond it exists.
-      if (!result.hasMore && cursor === 1) break;
+      if (!result.hasMore) break;
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -259,53 +903,120 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
     if (result.truncated) warnings.push("DexPaprika discovery was truncated by the configured page budget.");
   }
 
-  // ---- Enrich: token metadata for pools discovered without symbols ----
-  // DexPaprika's search payload carries token addresses only, so any pool it
-  // discovered alone would render as a blank pair. Each lookup is rate-limited.
-  const unknownTokens = new Map<string, "base" | "quote">();
-  for (const pool of merged.values()) {
-    if (!pool.baseSymbol && pool.baseTokenAddress) unknownTokens.set(pool.baseTokenAddress, "base");
-    if (!pool.quoteSymbol && pool.quoteTokenAddress) {
-      if (!unknownTokens.has(pool.quoteTokenAddress)) unknownTokens.set(pool.quoteTokenAddress, "quote");
-    }
-  }
-  let tokenCalls = 0;
-  for (const [address, role] of unknownTokens) {
-    if (tokenCalls >= tokenBudget) break;
-    try {
-      const meta = await fetchTokenMetadata(address);
-      tokenCalls++;
-      if (!meta) continue;
-      for (const pool of merged.values()) {
-        if (role === "base" && pool.baseTokenAddress === address && !pool.baseSymbol) {
-          pool.baseSymbol = meta.symbol;
-          if (pool.marketCapUsd === null) pool.marketCapUsd = meta.marketCapUsd;
-          if (pool.fdvUsd === null) pool.fdvUsd = meta.fdvUsd;
-        }
-        if (role === "quote" && pool.quoteTokenAddress === address && !pool.quoteSymbol) {
-          pool.quoteSymbol = meta.symbol;
-        }
-      }
-    } catch (err) {
-      warnings.push(`Token metadata lookup failed for ${address.slice(0, 10)}…: ${err instanceof Error ? err.message : String(err)}`);
-      break; // upstream is throttling
-    }
+  // Incomplete rows must remain eligible for detail enrichment even when the
+  // current rotating discovery window did not return them. Otherwise a pool
+  // found once through DexPaprika can stay unnamed forever simply because it
+  // is outside GeckoTerminal pages fetched in later runs.
+  const persistedIncomplete = getDb()
+    .prepare(
+      `SELECT p.pool_key AS poolKey, p.chain_id AS chainId, p.dex_id AS dexId,
+              p.dex_name AS dexName, p.dex_version AS dexVersion,
+              p.pool_identifier AS poolIdentifier, p.identifier_kind AS identifierKind,
+              p.base_symbol AS baseSymbol, p.base_token_address AS baseTokenAddress,
+              p.quote_symbol AS quoteSymbol, p.quote_token_address AS quoteTokenAddress,
+              p.fee_tier_label AS feeTierLabel, p.pool_created_at AS poolCreatedAt,
+              m.liquidity_usd AS liquidityUsd, m.volume_24h_usd AS volume24hUsd,
+              m.volume_7d_usd AS volume7dUsd, m.price_usd AS priceUsd,
+              m.price_change_24h AS priceChange24h, m.fee_rate AS feeRate,
+              m.fee_source AS feeSource, m.source, m.updated_at AS updatedAt,
+              t.market_cap_usd AS marketCapUsd, t.fdv_usd AS fdvUsd
+       FROM pools p
+       JOIN pool_metrics m ON m.pool_key = p.pool_key
+       LEFT JOIN tokens t ON t.chain_id = p.chain_id AND t.address = p.base_token_address
+       WHERE p.base_symbol IS NULL OR p.quote_symbol IS NULL OR m.fee_rate IS NULL`,
+    )
+    .all() as (DiscoveredPool & { poolKey: string })[];
+  for (const stored of persistedIncomplete) {
+    if (merged.has(stored.poolKey)) continue;
+    merged.set(stored.poolKey, stored);
   }
 
-  // ---- Enrich: exact fee for the most important pools only ----
-  // The detail endpoint is one rate-limit slot per call, so it is budgeted to
-  // the top of the leaderboard where the number actually gets read.
-  const ranked = [...merged.values()].sort(
-    (a, b) => (b.liquidityUsd ?? -1) - (a.liquidityUsd ?? -1),
+  // DexPaprika's search rows often omit symbols even when a previous sync has
+  // already resolved them. Hydrate those known values before ranking detail
+  // calls, otherwise the small GeckoTerminal budget is wasted re-fetching
+  // complete pools while genuinely unnamed pools remain unresolved.
+  const storedIdentities = getDb()
+    .prepare(
+      `SELECT pool_key AS poolKey, base_symbol AS baseSymbol,
+              base_token_address AS baseTokenAddress,
+              quote_symbol AS quoteSymbol,
+              quote_token_address AS quoteTokenAddress
+       FROM pools`,
+    )
+    .all() as {
+    poolKey: string;
+    baseSymbol: string | null;
+    baseTokenAddress: string | null;
+    quoteSymbol: string | null;
+    quoteTokenAddress: string | null;
+  }[];
+  for (const stored of storedIdentities) {
+    const pool = merged.get(stored.poolKey);
+    if (!pool) continue;
+    pool.baseSymbol ??= stored.baseSymbol;
+    pool.baseTokenAddress ??= stored.baseTokenAddress;
+    pool.quoteSymbol ??= stored.quoteSymbol;
+    pool.quoteTokenAddress ??= stored.quoteTokenAddress;
+  }
+
+  // ---- Enrich: pool detail (identity + exact fee) ----
+  /*
+   * A single GeckoTerminal pool-detail response contains both token metadata
+   * and the exact fee. Resolve it before spending separate token calls: pools
+   * discovered through DexPaprika can otherwise remain address-only while the
+   * token stage consumes the shared GeckoTerminal quota first.
+   */
+  const feeStaleBefore = new Date(now.getTime() - FEE_RECHECK_MS).toISOString();
+  const knownFeeKeys = new Set(
+    (
+      getDb()
+        .prepare(
+          `SELECT pool_key AS poolKey FROM pool_metrics
+           WHERE fee_rate IS NOT NULL OR fee_checked_at >= ?`,
+        )
+        .all(feeStaleBefore) as { poolKey: string }[]
+    ).map((row) => row.poolKey),
   );
+  const feeCheckedKeys = new Set<string>();
+  const ranked = [...merged.values()].sort((a, b) => {
+    const aMissingSymbol = !a.baseSymbol || !a.quoteSymbol;
+    const bMissingSymbol = !b.baseSymbol || !b.quoteSymbol;
+    const missingSymbolPriority = Number(bMissingSymbol) - Number(aMissingSymbol);
+    if (missingSymbolPriority) return missingSymbolPriority;
+    if (aMissingSymbol && bMissingSymbol) {
+      return (b.liquidityUsd ?? -1) - (a.liquidityUsd ?? -1);
+    }
+    const missingVolumePriority = Number(b.volume24hUsd === null) - Number(a.volume24hUsd === null);
+    const aNeedsFee = a.feeRate === null && !knownFeeKeys.has(poolKeyOf(a));
+    const bNeedsFee = b.feeRate === null && !knownFeeKeys.has(poolKeyOf(b));
+    const missingFeePriority = Number(bNeedsFee) - Number(aNeedsFee);
+    return (
+      missingVolumePriority ||
+      missingFeePriority ||
+      (b.liquidityUsd ?? -1) - (a.liquidityUsd ?? -1)
+    );
+  });
   let detailCalls = 0;
   for (const pool of ranked) {
     if (detailCalls >= detailBudget) break;
     if (pool.identifierKind !== "address" && pool.identifierKind !== "bytes32") continue;
+    const key = poolKeyOf(pool);
+    const needsIdentity = !pool.baseSymbol || !pool.quoteSymbol;
+    const needsFee = pool.feeRate === null && !knownFeeKeys.has(key);
+    const needsVolume = pool.volume24hUsd === null;
+    if (!needsIdentity && !needsFee && !needsVolume) continue;
     try {
       const detail = await fetchPoolDetail(pool.poolIdentifier);
       detailCalls++;
       if (!detail) continue;
+      feeCheckedKeys.add(key);
+      // Pool detail is authoritative for token ordering. DexPaprika sometimes
+      // reports Arc's native zero-address USDC on the opposite side.
+      pool.baseSymbol = detail.baseSymbol ?? pool.baseSymbol;
+      pool.baseTokenAddress = detail.baseTokenAddress ?? pool.baseTokenAddress;
+      pool.quoteSymbol = detail.quoteSymbol ?? pool.quoteSymbol;
+      pool.quoteTokenAddress = detail.quoteTokenAddress ?? pool.quoteTokenAddress;
+      pool.feeTierLabel = detail.feeTierLabel ?? pool.feeTierLabel;
       if (detail.feeRate) {
         pool.feeRate = detail.feeRate;
         pool.feeSource = "detail_api";
@@ -316,13 +1027,161 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
       if (pool.volume24hUsd === null && detail.volume24hUsd !== null) {
         pool.volume24hUsd = detail.volume24hUsd;
       }
+      if (pool.marketCapUsd === null && detail.marketCapUsd !== null) {
+        pool.marketCapUsd = detail.marketCapUsd;
+      }
+      if (pool.fdvUsd === null && detail.fdvUsd !== null) {
+        pool.fdvUsd = detail.fdvUsd;
+      }
+      pool.poolCreatedAt = detail.poolCreatedAt ?? pool.poolCreatedAt;
     } catch (err) {
       warnings.push(
-        `Fee lookup failed for ${pool.baseSymbol}/${pool.quoteSymbol} (${pool.poolIdentifier.slice(0, 10)}…): ${
+        `Pool detail lookup paused for ${pool.poolIdentifier.slice(0, 10)}…: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
-      break; // upstream is throttling; stop spending quota
+      break;
+    }
+  }
+
+  // ---- Enrich: token metadata for pools discovered without symbols ----
+  /*
+   * DexPaprika's search payload carries token addresses only, so any pool it
+   * discovered alone renders as a blank pair until the token is named. Two
+   * upstreams are tried, GeckoTerminal first and DexPaprika second, because
+   * their quotas are separate: when GeckoTerminal is exhausted (measured: a
+   * hard 429 mid-sync) the DexPaprika pass still makes progress instead of the
+   * whole enrichment stage aborting on the first failure.
+   */
+  const unknownTokens = new Map<string, Set<"base" | "quote">>();
+  const addUnknown = (address: string | null, role: "base" | "quote") => {
+    if (!address) return;
+    const roles = unknownTokens.get(address) ?? new Set<"base" | "quote">();
+    roles.add(role);
+    unknownTokens.set(address, roles);
+  };
+  for (const pool of merged.values()) {
+    if (!pool.baseSymbol) addUnknown(pool.baseTokenAddress, "base");
+    if (!pool.quoteSymbol) addUnknown(pool.quoteTokenAddress, "quote");
+  }
+
+  /*
+   * Valuation enrichment. The GeckoTerminal LIST endpoint returns market cap for
+   * the pool's base token, but it is null for most Arc tokens, whereas the
+   * per-token endpoint returns it for some of them (measured: cirbtc resolves
+   * to $510.3M while the list endpoint reports null). So a pool that already has
+   * a symbol can still be missing its valuation and must also be queued —
+   * previously only symbol-less pools were looked up, which left market-cap
+   * coverage at ~5% of pools even though the data was reachable.
+   *
+   * FDV is queued for the same reason and is never used to stand in for MCAP.
+   */
+  const valuationTokens = new Set<string>();
+  for (const pool of merged.values()) {
+    const address = pool.baseTokenAddress;
+    if (!address || address.startsWith("0x0000")) continue;
+    if (pool.marketCapUsd === null || pool.fdvUsd === null) valuationTokens.add(address);
+  }
+
+  const pending = new Set(unknownTokens.keys());
+  // Valuation-only lookups are appended after symbol resolution so naming a
+  // pool always wins priority over enriching an already-named one.
+  for (const address of valuationTokens) pending.add(address);
+  const resolved = new Map<string, { symbol: string | null; fdvUsd: number | null }>();
+
+  const applyToken = (
+    address: string,
+    symbol: string | null,
+    fdvUsd: number | null,
+  ) => {
+    resolved.set(address, { symbol, fdvUsd });
+    for (const pool of merged.values()) {
+      if (!pool.baseSymbol && pool.baseTokenAddress === address && symbol) {
+        pool.baseSymbol = symbol;
+      }
+      if (!pool.quoteSymbol && pool.quoteTokenAddress === address && symbol) {
+        pool.quoteSymbol = symbol;
+      }
+      /*
+       * FDV is filled regardless of whether the symbol was resolved above: a
+       * token that already had a symbol can still be missing its valuation.
+       * FDV is stored only in its own field and is never used as a market-cap
+       * substitute.
+       */
+      if (pool.baseTokenAddress === address && pool.fdvUsd === null && fdvUsd) {
+        pool.fdvUsd = fdvUsd;
+      }
+    }
+  };
+
+  // Pass 1 — GeckoTerminal (also the only source of market cap here).
+  let gtTokenCalls = 0;
+  for (const address of pending) {
+    if (gtTokenCalls >= tokenBudget) break;
+    try {
+      const meta = await fetchTokenMetadata(address);
+      gtTokenCalls++;
+      if (!meta) continue;
+      applyToken(address, meta.symbol, meta.fdvUsd);
+      for (const pool of merged.values()) {
+        if (
+          pool.baseTokenAddress === address &&
+          pool.marketCapUsd === null &&
+          meta.marketCapUsd !== null
+        ) {
+          pool.marketCapUsd = meta.marketCapUsd;
+        }
+      }
+      pending.delete(address);
+    } catch (err) {
+      warnings.push(
+        `GeckoTerminal token lookup paused (${address.slice(0, 10)}…): ${
+          err instanceof Error ? err.message : String(err)
+        }. Falling back to DexPaprika for the remaining symbols.`,
+      );
+      break; // quota exhausted — hand the rest to the second upstream
+    }
+  }
+
+  // Pass 2 — DexPaprika, on a separate quota.
+  let dpTokenCalls = 0;
+  for (const address of pending) {
+    if (dpTokenCalls >= (options.tokenBudget ?? DEFAULTS.tokenBudget)) break;
+    try {
+      const meta = await fetchToken(address);
+      dpTokenCalls++;
+      if (!meta) continue;
+      applyToken(address, meta.symbol, meta.fdvUsd);
+    } catch (err) {
+      warnings.push(
+        `DexPaprika token lookup paused: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      break;
+    }
+  }
+
+  // Pass 3 — direct Arc RPC. ERC-20 symbol() is deterministic on-chain and
+  // avoids leaving address-only rows when both third-party indexers miss a
+  // newly deployed token. This pass is for names only, never valuation.
+  let rpcTokenCalls = 0;
+  for (const address of unknownTokens.keys()) {
+    if (!pending.has(address) || rpcTokenCalls >= rpcTokenBudget) continue;
+    if (/^0x0{40}$/i.test(address)) {
+      applyToken(address, "USDC", null);
+      pending.delete(address);
+      continue;
+    }
+    try {
+      rpcTokenCalls++;
+      const symbol = await fetchTokenSymbol(address);
+      if (!symbol) continue;
+      applyToken(address, symbol, null);
+      pending.delete(address);
+    } catch (err) {
+      warnings.push(
+        `Arc RPC token lookup paused: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      break;
     }
   }
 
@@ -348,27 +1207,25 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
       fee_tier_label = COALESCE(excluded.fee_tier_label, pools.fee_tier_label),
       pool_created_at = COALESCE(excluded.pool_created_at, pools.pool_created_at)
   `);
-  /*
-   * COALESCE would resurrect a market cap that the valuation check has just
-   * rejected, because the incoming value is NULL. So once a pool reports a
-   * valuation at all, the sanitized pair (including NULL) is written through;
-   * COALESCE only applies when this source offered nothing this cycle.
-   */
+  /* Each valuation field is updated only when that field was actually reported.
+   * This preserves a CMC fallback market cap when GeckoTerminal reports only FDV,
+   * while still allowing an invalid non-null market cap to be cleared after the
+   * consistency check rejects it. */
   const upsertToken = db.prepare(`
     INSERT INTO tokens (chain_id, address, name, symbol, decimals, market_cap_usd, fdv_usd)
     VALUES (@chainId, @address, @name, @symbol, @decimals, @marketCapUsd, @fdvUsd)
     ON CONFLICT(chain_id, address) DO UPDATE SET
       name = COALESCE(excluded.name, tokens.name),
       symbol = COALESCE(excluded.symbol, tokens.symbol),
-      market_cap_usd = CASE WHEN @valuationProvided = 1 THEN excluded.market_cap_usd ELSE COALESCE(excluded.market_cap_usd, tokens.market_cap_usd) END,
-      fdv_usd = CASE WHEN @valuationProvided = 1 THEN excluded.fdv_usd ELSE COALESCE(excluded.fdv_usd, tokens.fdv_usd) END
+      market_cap_usd = CASE WHEN @marketCapProvided = 1 THEN excluded.market_cap_usd ELSE tokens.market_cap_usd END,
+      fdv_usd = CASE WHEN @fdvProvided = 1 THEN excluded.fdv_usd ELSE tokens.fdv_usd END
   `);
   const upsertMetrics = db.prepare(`
     INSERT INTO pool_metrics (pool_key, liquidity_usd, volume_24h_usd, volume_7d_usd, price_usd,
-      price_change_24h, fee_rate, fee_source, apr_24h, apr_7d, apr_method, apr_confidence,
+      price_change_24h, fee_rate, fee_source, fee_checked_at, apr_24h, apr_7d, apr_method, apr_confidence,
       apr_reason, source, updated_at, stale)
     VALUES (@poolKey, @liquidityUsd, @volume24hUsd, @volume7dUsd, @priceUsd, @priceChange24h,
-      @feeRate, @feeSource, @apr24h, @apr7d, @aprMethod, @aprConfidence, @aprReason,
+      @feeRate, @feeSource, @feeCheckedAt, @apr24h, @apr7d, @aprMethod, @aprConfidence, @aprReason,
       @source, @updatedAt, 0)
     ON CONFLICT(pool_key) DO UPDATE SET
       liquidity_usd = excluded.liquidity_usd,
@@ -378,6 +1235,7 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
       price_change_24h = excluded.price_change_24h,
       fee_rate = excluded.fee_rate,
       fee_source = excluded.fee_source,
+      fee_checked_at = COALESCE(excluded.fee_checked_at, pool_metrics.fee_checked_at),
       apr_24h = excluded.apr_24h,
       apr_7d = excluded.apr_7d,
       apr_method = excluded.apr_method,
@@ -391,9 +1249,16 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
     INSERT OR REPLACE INTO pool_snapshots (pool_key, captured_at, liquidity_usd, volume_24h_usd, est_apr_24h)
     VALUES (?, ?, ?, ?, ?)
   `);
-  const clearFlags = db.prepare(`DELETE FROM pool_flags WHERE pool_key = ?`);
+  const clearFlags = db.prepare(
+    `DELETE FROM pool_flags
+     WHERE pool_key = ?
+       AND flag NOT IN ('mcap_estimated_cmc', 'mcap_estimated_dexscreener', 'holders_cmc')`,
+  );
   const insertFlag = db.prepare(
     `INSERT OR REPLACE INTO pool_flags (pool_key, flag, detail) VALUES (?, ?, ?)`,
+  );
+  const clearEstimatedMcapFlags = db.prepare(
+    `DELETE FROM pool_flags WHERE pool_key = ? AND flag LIKE 'mcap_estimated_%'`,
   );
 
   const run = db.transaction(() => {
@@ -452,14 +1317,19 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
       });
 
       // Market cap is only trusted when it is internally consistent with FDV.
-      const rawValuationReported = pool.marketCapUsd !== null || pool.fdvUsd !== null;
+      const marketCapProvided = pool.marketCapUsd !== null;
+      const fdvProvided = pool.fdvUsd !== null;
       const valuation = sanitizeValuation(pool.marketCapUsd, pool.fdvUsd);
       pool.marketCapUsd = valuation.marketCapUsd;
       pool.fdvUsd = valuation.fdvUsd;
 
       const flags = detectFlags(pool);
-      if (valuation.reason) {
-        flags.push({ flag: "mcap_inconsistent", detail: valuation.reason });
+      if (valuation.grade === "discarded") {
+        flags.push({ flag: "mcap_discarded", detail: valuation.reason });
+      } else if (valuation.grade === "above_fdv") {
+        // A distinct, milder label: the figure is kept, so calling it
+        // "inconsistent" would overstate what we actually know.
+        flags.push({ flag: "mcap_above_fdv", detail: valuation.reason });
       }
       if (conflictedKeys.has(key)) {
         flags.push({
@@ -518,7 +1388,8 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
           // silently becomes MCAP.
           marketCapUsd: pool.marketCapUsd,
           fdvUsd: pool.fdvUsd,
-          valuationProvided: rawValuationReported ? 1 : 0,
+          marketCapProvided: marketCapProvided ? 1 : 0,
+          fdvProvided: fdvProvided ? 1 : 0,
         });
       }
 
@@ -531,6 +1402,7 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
         priceChange24h: pool.priceChange24h,
         feeRate: pool.feeRate,
         feeSource: pool.feeSource,
+        feeCheckedAt: feeCheckedKeys.has(key) ? now.toISOString() : null,
         apr24h: apr24.apr24h,
         apr7d: apr7.apr7d,
         aprMethod: apr24.method,
@@ -549,6 +1421,7 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
       );
 
       clearFlags.run(key);
+      if (marketCapProvided) clearEstimatedMcapFlags.run(key);
       for (const flag of flags) insertFlag.run(key, flag.flag, flag.detail);
     }
 
@@ -570,6 +1443,26 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
 
   run();
 
+  const dexScreener = await refreshKnownPoolsFromDexScreener(now);
+  if (dexScreener.errors.length) {
+    warnings.push(
+      `DexScreener refresh completed with ${dexScreener.errors.length} failed batch(es).`,
+    );
+  }
+  const missingVolume = await refreshMissingVolumesFromGeckoTerminal(now);
+  if (missingVolume.errors.length) {
+    warnings.push("GeckoTerminal missing-volume fallback stopped after an upstream error.");
+  }
+  const coinMarketCap = await refreshKnownTokensFromCoinMarketCap(
+    now,
+    options.cmcTokenBudget ?? DEFAULTS.cmcTokenBudget,
+  );
+  if (coinMarketCap.errors.length) {
+    warnings.push(
+      `CoinMarketCap token enrichment completed with ${coinMarketCap.errors.length} error(s).`,
+    );
+  }
+
   const result: SyncResult = {
     discovered: merged.size,
     upserted: seenKeys.length,
@@ -577,8 +1470,14 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
     pagesFetched,
     startPage,
     detailCalls,
-    tokenCalls,
+    gtTokenCalls,
+    dpTokenCalls,
+    rpcTokenCalls,
+    tokensUnresolved: pending.size,
     crossCheck,
+    dexScreener,
+    missingVolume,
+    coinMarketCap,
     warnings,
     startedAt,
     finishedAt: new Date().toISOString(),

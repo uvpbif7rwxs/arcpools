@@ -12,9 +12,17 @@ export function formatUsd(value: number | null | undefined, opts: { compact?: bo
   if (value === null || value === undefined || !Number.isFinite(value)) return NA;
   const abs = Math.abs(value);
   if (!opts.compact || abs < 1000) {
+    /*
+     * Two different jobs share this helper. A table column wants the finance
+     * convention — `$12.34` — while a detail row is allowed to show a precise
+     * figure such as `$5.4216` for a sub-dollar volume. In compact mode the
+     * column wins, because four decimal places in a scanned column reads as a
+     * rendering fault rather than as precision.
+     */
+    const maxDecimals = opts.compact ? 2 : abs < 100 ? 4 : 0;
     return `$${value.toLocaleString("en-US", {
-      minimumFractionDigits: abs < 100 ? 2 : 0,
-      maximumFractionDigits: abs < 100 ? 4 : 0,
+      minimumFractionDigits: Math.min(2, maxDecimals),
+      maximumFractionDigits: maxDecimals,
     })}`;
   }
   if (abs >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(2)}B`;
